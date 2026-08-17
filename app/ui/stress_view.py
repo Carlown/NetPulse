@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
-                            InfoBarPosition, LineEdit, MessageBox,
+                            InfoBarPosition, MessageBox,
                             PrimaryPushButton, ProgressBar, PushButton,
                             ScrollArea, SimpleCardWidget, Slider, SpinBox,
                             StrongBodyLabel, SubtitleLabel, TextEdit)
@@ -104,7 +104,7 @@ class StressView(ScrollArea):
         f = settings.stress_form or {}
         try:
             if f.get("target"):
-                self.targetEdit.setText(str(f["target"]))
+                self.targetEdit.setPlainText(str(f["target"]))
             if f.get("port"):
                 self.portSpin.setValue(int(f["port"]))
             if f.get("protocol"):
@@ -129,7 +129,7 @@ class StressView(ScrollArea):
     def _save_form(self):
         """把当前表单状态存到本地，下次启动恢复。"""
         settings.set("stress_form", {
-            "target": self.targetEdit.text().strip(),
+            "target": self.targetEdit.toPlainText().strip(),
             "port": self.portSpin.value(),
             "protocol": self.protoCombo.currentText(),
             "threads": self.threadSpin.value(),
@@ -147,10 +147,13 @@ class StressView(ScrollArea):
         lay.setSpacing(10)
         lay.addWidget(StrongBodyLabel(L("目标配置", "Target Configuration"), card))
 
-        self.targetEdit = LineEdit(card)
-        self.targetEdit.setPlaceholderText(L("目标地址（如 127.0.0.1 或 https://example.com）",
-                                             "Target (e.g. 127.0.0.1 or https://example.com)"))
-        lay.addWidget(BodyLabel(L("目标地址", "Target"), card))
+        lay.addWidget(BodyLabel(L("目标地址（每行一个，支持多目标同时测试）",
+                                  "Targets (one per line; multiple targets run in parallel)"), card))
+        self.targetEdit = TextEdit(card)
+        self.targetEdit.setPlaceholderText(L("https://example.com\n127.0.0.1\napi.example.com",
+                                             "https://example.com\n127.0.0.1\napi.example.com"))
+        self.targetEdit.setFixedHeight(92)
+        self.targetEdit.setAcceptRichText(False)
         lay.addWidget(self.targetEdit)
 
         prow = QHBoxLayout()
@@ -165,7 +168,7 @@ class StressView(ScrollArea):
         prow.addWidget(self._wrap(BodyLabel(L("协议", "Protocol"), card), self.protoCombo))
         lay.addLayout(prow)
 
-        lay.addWidget(BodyLabel(L("并发线程数", "Concurrency Threads"), card))
+        lay.addWidget(BodyLabel(L("并发线程数（每目标）", "Concurrency Threads (per target)"), card))
         thread_row = QHBoxLayout()
         self.threadSlider = Slider(Qt.Horizontal, card)
         self.threadSlider.setRange(1, 1024)
@@ -270,6 +273,12 @@ class StressView(ScrollArea):
         self.errLabel.setWordWrap(True)
         lay.addWidget(self.errLabel)
 
+        # 分目标实时状态（多目标时显示每个目标的成功/失败）
+        self.targetsLabel = CaptionLabel("", card)
+        self.targetsLabel.setStyleSheet("color:#0078D4; background:transparent;")
+        self.targetsLabel.setWordWrap(True)
+        lay.addWidget(self.targetsLabel)
+
         lay.addSpacing(4)
         btn_row = QHBoxLayout()
         self.startBtn = PrimaryPushButton(L("开始测试", "Start"), card)
@@ -324,30 +333,55 @@ class StressView(ScrollArea):
         hosts = [a["host"] for a in settings.authorized]
         self.authListLabel.setText(", ".join(hosts) if hosts else L("（暂无）", "(none)"))
 
+    def _parse_targets(self):
+        """解析多行目标输入 → [(原始行, 规范化host)]，去重保序；空返回 []。"""
+        targets, seen = [], set()
+        for ln in self.targetEdit.toPlainText().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            host = normalize_host(ln)
+            if not host:
+                InfoBar.warning(L("参数错误", "Invalid input"),
+                                L(f"无效目标：{ln}", f"Invalid target: {ln}"), parent=self.window())
+                return None
+            if host in seen:
+                continue
+            seen.add(host)
+            targets.append((ln, host))
+        return targets
+
     def _start(self):
-        target_raw = self.targetEdit.text().strip()
-        host = normalize_host(target_raw)
-        if not host:
+        targets = self._parse_targets()
+        if targets is None:
+            return
+        if not targets:
             InfoBar.warning(L("参数错误", "Invalid input"),
-                            L("请输入目标地址", "Please enter a target"), parent=self.window())
+                            L("请至少输入一个目标地址", "Enter at least one target"), parent=self.window())
             return
         proto = self.protoCombo.currentText()
-        if not is_authorized(host):
-            dlg = AuthDialog(host, self.window())
-            if not dlg.exec():
-                InfoBar.warning(L("已取消", "Cancelled"),
-                                L("目标未授权，测试已阻止", "Target not authorized; test blocked"),
-                                parent=self.window())
-                return
-            add_authorized(host, dlg.note())
-            self.refresh_auth_list()
+
+        # 逐个目标授权确认
+        for _, host in targets:
+            if not is_authorized(host):
+                dlg = AuthDialog(host, self.window())
+                if not dlg.exec():
+                    InfoBar.warning(L("已取消", "Cancelled"),
+                                    L(f"目标 {host} 未授权，测试已阻止", f"Target {host} not authorized; test blocked"),
+                                    parent=self.window())
+                    return
+                add_authorized(host, dlg.note())
+        self.refresh_auth_list()
 
         rate = self.rateSpin.value()
         if rate > HIGH_RATE:
+            n = len(targets)
             w = MessageBox(L("高请求速率二次确认", "High Rate Confirmation"),
-                           L(f"速率上限将设置为 {rate} QPS。请再次确认您拥有 {host} 的授权，且目标可承受该速率。",
-                             f"Rate limit will be {rate} QPS. Confirm again that {host} is authorized "
-                             f"and can handle this rate."), self.window())
+                           L(f"每个目标速率上限 {rate} QPS，共 {n} 个目标（合计约 {rate * n} QPS）。"
+                             f"请再次确认您拥有全部目标授权，且目标可承受该速率。",
+                             f"Rate cap is {rate} QPS per target, {n} target(s) total (~{rate * n} QPS combined). "
+                             f"Confirm again that all targets are authorized and can handle this rate."),
+                           self.window())
             if not w.exec():
                 InfoBar.warning(L("已取消", "Cancelled"),
                                 L("高速率未确认，测试已取消", "High rate not confirmed; cancelled"),
@@ -355,14 +389,6 @@ class StressView(ScrollArea):
                 return
 
         port = self.portSpin.value()
-        if proto in ("HTTP", "HTTPS"):
-            url = target_raw if target_raw.startswith("http") else f"{proto.lower()}://{host}"
-            if proto == "HTTP" and port != 80:
-                url += f":{port}"
-            elif proto == "HTTPS" and port != 443:
-                url += f":{port}"
-        else:
-            url = ""
         try:
             headers = json_loads(self.headersEdit.toPlainText()) if self.headersEdit.toPlainText().strip() else {}
         except ValueError:
@@ -370,21 +396,35 @@ class StressView(ScrollArea):
                             L("请求头须为合法 JSON", "Headers must be valid JSON"), parent=self.window())
             return
 
-        config = {
-            "target": host, "port": port, "protocol": proto, "url": url,
-            "threads": self.threadSpin.value(), "duration": self.get_duration_seconds(),
-            "rate": rate, "packet_size": settings.default_packet_size,
-            "timeout": settings.default_timeout_ms, "headers": headers,
-        }
+        configs = []
+        for raw, host in targets:
+            url = ""
+            if proto in ("HTTP", "HTTPS"):
+                url = raw if raw.startswith("http") else f"{proto.lower()}://{host}"
+                default_port = 443 if proto == "HTTPS" else 80
+                if port != default_port:
+                    url += f":{port}"
+            configs.append({
+                "target": host, "port": port, "protocol": proto, "url": url,
+                "threads": self.threadSpin.value(), "duration": self.get_duration_seconds(),
+                "rate": rate, "packet_size": settings.default_packet_size,
+                "timeout": settings.default_timeout_ms, "headers": headers,
+            })
+
         self._save_form()  # 持久化本次配置，重启后自动恢复
-        log.info(f"开始压测: {proto}://{host}:{port} threads={config['threads']} rate={rate} duration={config['duration']}s")
-        engine.start(config)
+        hosts = ", ".join(c["target"] for c in configs)
+        log.info(f"开始压测({len(configs)}目标): {hosts} threads={configs[0]['threads']} "
+                 f"rate={rate} duration={configs[0]['duration']}s")
+        engine.start(configs)
         self.startBtn.setEnabled(False)
         self.stopBtn.setEnabled(True)
-        self.statusLabel.setText(L("运行中", "Running"))
+        n = len(configs)
+        self.statusLabel.setText(L("运行中", "Running") if n == 1
+                                 else L(f"运行中 · {n} 个目标", f"Running · {n} targets"))
         self.progressBar.setValue(0)
         self.mTx.setText("0 B")
         self.errLabel.setText(L("最近失败原因：—", "Last error: —"))
+        self.targetsLabel.setText("")
 
     def _stop(self):
         engine.stop()
@@ -405,6 +445,10 @@ class StressView(ScrollArea):
                                     f"Last error: {err_text(last_err)}"))
         else:
             self.errLabel.setText(L("最近失败原因：—", "Last error: —"))
+        # 分目标实时状态
+        parts = [f"{t['host']}: ✓{t['success']} ✗{t['fail']} ({t['qps']:.0f} QPS)"
+                 for t in d.get("targets", [])]
+        self.targetsLabel.setText("  |  ".join(parts))
 
     def _on_report(self, r):
         self.startBtn.setEnabled(True)
@@ -414,13 +458,30 @@ class StressView(ScrollArea):
         err_rate = (r["fail"] / r["total"] * 100) if r["total"] else 0.0
         dur = r["duration"]
         dur_text = (f"{dur:.1f} " + L("秒", "s")) if dur < 60 else (f"{dur / 60:.1f} " + L("分钟", "min"))
-        text = (
-            L(f"目标 {r['protocol']}://{r['target']}  |  持续 {dur_text}\n",
-              f"Target {r['protocol']}://{r['target']}  |  Duration {dur_text}\n")
-            + L(f"总请求 {r['total']}  成功 {r['success']}  失败 {r['fail']}（错误率 {err_rate:.2f}%）\n",
-                f"Total {r['total']}  Success {r['success']}  Failed {r['fail']} (error rate {err_rate:.2f}%)\n")
-            + L(f"平均延迟 {r['avg']:.1f} ms   P50 {r['p50']:.1f} ms   P90 {r['p90']:.1f} ms   P99 {r['p99']:.1f} ms\n",
-                f"Avg latency {r['avg']:.1f} ms   P50 {r['p50']:.1f} ms   P90 {r['p90']:.1f} ms   P99 {r['p99']:.1f} ms\n")
+        targets = r.get("targets") or []
+
+        # 多目标：逐目标明细 + 汇总
+        if len(targets) > 1:
+            text = L(f"共 {len(targets)} 个目标  |  持续 {dur_text}\n",
+                     f"{len(targets)} targets  |  Duration {dur_text}\n")
+            for t in targets:
+                ter = (t["fail"] / t["total"] * 100) if t["total"] else 0.0
+                text += L(f"• {t['protocol']}://{t['target']}  共 {t['total']} 成功 {t['success']} "
+                          f"失败 {t['fail']}（{ter:.1f}%）平均 {t['avg']:.1f} ms  {fmt_bytes(t.get('bytes_tx', 0))}\n",
+                          f"• {t['protocol']}://{t['target']}  total {t['total']} ok {t['success']} "
+                          f"fail {t['fail']} ({ter:.1f}%) avg {t['avg']:.1f} ms  {fmt_bytes(t.get('bytes_tx', 0))}\n")
+            text += L(f"合计 {r['total']}  成功 {r['success']}  失败 {r['fail']}（错误率 {err_rate:.2f}%）\n",
+                      f"Total {r['total']}  success {r['success']}  failed {r['fail']} (error rate {err_rate:.2f}%)\n")
+        else:
+            text = (
+                L(f"目标 {r['protocol']}://{r['target']}  |  持续 {dur_text}\n",
+                  f"Target {r['protocol']}://{r['target']}  |  Duration {dur_text}\n")
+                + L(f"总请求 {r['total']}  成功 {r['success']}  失败 {r['fail']}（错误率 {err_rate:.2f}%）\n",
+                    f"Total {r['total']}  Success {r['success']}  Failed {r['fail']} (error rate {err_rate:.2f}%)\n")
+            )
+        text += (
+            L(f"平均延迟 {r['avg']:.1f} ms   P50 {r['p50']:.1f} ms   P90 {r['p90']:.1f} ms   P99 {r['p99']:.1f} ms\n",
+              f"Avg latency {r['avg']:.1f} ms   P50 {r['p50']:.1f} ms   P90 {r['p90']:.1f} ms   P99 {r['p99']:.1f} ms\n")
             + L(f"总发送流量 {fmt_bytes(r.get('bytes_tx', 0))}   速率上限 {r['rate_limit']} QPS",
                 f"Total sent {fmt_bytes(r.get('bytes_tx', 0))}   Rate cap {r['rate_limit']} QPS")
         )
@@ -435,7 +496,7 @@ class StressView(ScrollArea):
     def fill_defaults(self, target="", port=80, protocol="HTTP"):
         """快速开始入口。"""
         if target:
-            self.targetEdit.setText(target)
+            self.targetEdit.setPlainText(target)
         self.portSpin.setValue(port)
         idx = self.protoCombo.findText(protocol)
         if idx >= 0:

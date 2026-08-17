@@ -63,6 +63,18 @@ def main():
 
     monitor.start()
     log.info("NetPulse 启动。")
+
+    # 启动 3 秒后静默检查更新（仅在有新版本时弹窗）
+    def _auto_update_check():
+        try:
+            from app.services.updater import check_for_updates
+            check_for_updates(parent=win, manual=False)
+        except Exception:
+            pass
+
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(3000, _auto_update_check)
+
     code = app.exec()
     monitor.stop()
     return code

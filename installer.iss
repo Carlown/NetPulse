@@ -1,6 +1,6 @@
 ; NetPulse 安装程序脚本（Inno Setup 7）
 #define MyAppName "NetPulse"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "NetPulse"
 #define MyAppExeName "NetPulse.exe"
 
@@ -14,7 +14,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=installer
-OutputBaseFilename=NetPulse-Setup-1.0.0
+OutputBaseFilename=NetPulse-Setup-1.0.1
 SetupIconFile=app.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -28,7 +28,7 @@ Name: "chinese"; MessagesFile: "compiler:Default.isl"
 ; 覆盖为简体中文
 SetupAppTitle=安装 - NetPulse
 WelcomeLabel1=欢迎使用 [name] 安装向导
-WelcomeLabel2=此向导将引导您在电脑上安装 [name/1.0.0]。%n%n建议在继续之前关闭其他应用程序。
+WelcomeLabel2=此向导将引导您在电脑上安装 [name/1.0.1]。%n%n建议在继续之前关闭其他应用程序。
 WizardReady=准备安装
 ReadyLabel1=安装向导已准备好把 [name] 安装到您的电脑。
 ReadyLabel2b=点击“安装”继续，或点击“上一步”检查或修改设置。

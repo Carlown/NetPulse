@@ -1,4 +1,4 @@
-"""压力测试引擎：多线程 worker + 令牌桶限速，支持 HTTP/HTTPS/TCP/UDP/ICMP。"""
+"""压力测试引擎：多线程 worker + 令牌桶限速，支持 HTTP/HTTPS/TCP/UDP/ICMP，多目标并行。"""
 import socket
 import statistics
 import threading
@@ -6,7 +6,7 @@ import time
 from collections import deque
 
 import requests
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.services.rate_limiter import TokenBucket
 
@@ -307,4 +307,133 @@ class StressEngine(QObject):
         return float(sum(b[1] for b in self._buckets))
 
 
-engine = StressEngine()
+class MultiStressEngine(QObject):
+    """多目标管理器：每个目标一个独立 StressEngine，聚合实时统计与汇总报告。
+
+    start() 接受 dict（单目标，兼容协同模式）或 list[dict]（多目标并行）。
+    """
+
+    snapshot = Signal(dict)      # 聚合实时统计（含分目标明细 targets）
+    report_ready = Signal(dict)  # 聚合汇总报告（含分目标明细 targets）
+
+    def __init__(self):
+        super().__init__()
+        self.running = False
+        self._children = []
+        self._snaps = {}
+        self._reports = {}
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._emit_aggregate)
+
+    def start(self, configs) -> bool:
+        if isinstance(configs, dict):
+            configs = [configs]
+        if self.running or not configs:
+            return False
+        self._children = []
+        self._snaps = {}
+        self._reports = {}
+        for i, c in enumerate(configs):
+            e = StressEngine()
+            e._idx = i
+            e.snapshot.connect(lambda d, e=e: self._on_child_snap(e, d))
+            e.report_ready.connect(lambda r, e=e: self._on_child_report(e, r))
+            if not e.start(c):
+                continue
+            self._children.append(e)
+        if not self._children:
+            return False
+        self.running = True
+        self._timer.start()
+        return True
+
+    def stop(self):
+        for e in self._children:
+            e.stop()
+
+    # ---------- 内部 ----------
+
+    def _on_child_snap(self, child, d):
+        self._snaps[child._idx] = (d, child.config or {})
+
+    def _on_child_report(self, child, r):
+        self._reports[child._idx] = r
+        if len(self._reports) >= len(self._children):
+            self._finish()
+
+    def _emit_aggregate(self):
+        if not self._snaps:
+            return
+        snaps = [self._snaps[i] for i in sorted(self._snaps)]
+        targets = []
+        last_err = ""
+        for d, c in snaps:
+            targets.append({
+                "host": c.get("target", "?"),
+                "total": d["total"], "success": d["success"], "fail": d["fail"],
+                "qps": d.get("qps", 0.0), "avg": d.get("avg", 0.0),
+                "tx": d.get("tx", 0),
+            })
+            if d.get("last_error"):
+                last_err = d["last_error"]
+        agg = {
+            "running": True,
+            "total": sum(t["total"] for t in targets),
+            "success": sum(t["success"] for t in targets),
+            "fail": sum(t["fail"] for t in targets),
+            "tx": sum(t["tx"] for t in targets),
+            "qps": sum(t["qps"] for t in targets),
+            "avg": (sum(t["avg"] * max(1, t["total"]) for t in targets)
+                    / sum(max(1, t["total"]) for t in targets)),
+            "active": sum(d.get("active", 0) for d, _ in snaps),
+            "progress": min(d.get("progress", 0.0) for d, _ in snaps),
+            "last_error": last_err,
+            "targets": targets,
+        }
+        self.snapshot.emit(agg)
+
+    def _finish(self):
+        self._timer.stop()
+        rs = [self._reports[i] for i in sorted(self._reports)]
+        self.running = False
+        self._children = []
+        self._snaps = {}
+
+        total = sum(r["total"] for r in rs)
+        tw = total or 1
+
+        def wavg(key):
+            return sum(r[key] * r["total"] for r in rs) / tw
+
+        errors = {}
+        for r in rs:
+            for k, v in (r.get("errors") or {}).items():
+                errors[k] = errors.get(k, 0) + v
+        single = len(rs) == 1
+        report = {
+            "target": rs[0]["target"] if single else f"{len(rs)}",
+            "protocol": rs[0]["protocol"] if single else "MIX",
+            "duration": max(r["duration"] for r in rs),
+            "total": total,
+            "success": sum(r["success"] for r in rs),
+            "fail": sum(r["fail"] for r in rs),
+            "avg": wavg("avg"), "p50": wavg("p50"),
+            "p90": wavg("p90"), "p99": wavg("p99"),
+            "traffic_mb": sum(r.get("traffic_mb", 0.0) for r in rs),
+            "bytes_tx": sum(r.get("bytes_tx", 0) for r in rs),
+            "rate_limit": sum(r.get("rate_limit", 0) for r in rs),
+            "errors": errors,
+            "targets": [{
+                "target": r["target"], "protocol": r["protocol"],
+                "duration": r["duration"], "total": r["total"],
+                "success": r["success"], "fail": r["fail"],
+                "avg": r["avg"], "p50": r["p50"], "p90": r["p90"], "p99": r["p99"],
+                "bytes_tx": r.get("bytes_tx", 0), "rate_limit": r.get("rate_limit", 0),
+                "errors": r.get("errors") or {},
+            } for r in rs],
+        }
+        self.report_ready.emit(report)
+
+
+engine = MultiStressEngine()

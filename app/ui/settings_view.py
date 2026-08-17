@@ -1,5 +1,6 @@
-"""设置页：主题/语言/默认参数/日志管理。"""
-from PySide6.QtCore import Qt
+"""设置页：主题/语言/默认参数/日志管理/检查更新/作者。"""
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             PushButton, ScrollArea, SimpleCardWidget, SpinBox,
@@ -8,8 +9,12 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
 
 from app.services.logger import log
 from app.services.settings import settings
+from app.services.updater import APP_VERSION, LATEST_URL, check_for_updates
 from app.ui.disclaimer import DisclaimerDialog
 from app.ui.i18n import L
+
+AUTHOR_NAME = "Carlown"
+AUTHOR_URL = "https://github.com/Carlown"
 
 
 class SettingRow(QWidget):
@@ -113,14 +118,47 @@ class SettingsView(ScrollArea):
         bl = QVBoxLayout(about)
         bl.setContentsMargins(20, 16, 20, 16)
         bl.addWidget(StrongBodyLabel(L("关于", "About"), about))
-        bl.addWidget(BodyLabel("NetPulse", about))
+        bl.addWidget(BodyLabel(f"NetPulse v{APP_VERSION}", about))
         bl.addWidget(CaptionLabel(L("仅用于合法授权的性能测试。", "For legally authorized testing only."), about))
+        brow = QHBoxLayout()
         self.disclaimerBtn = PushButton(L("查看免责声明", "View Disclaimer"), about)
         self.disclaimerBtn.clicked.connect(lambda: DisclaimerDialog(self.window()).exec())
-        bl.addWidget(self.disclaimerBtn)
+        self.updateBtn = PushButton(L("检查更新", "Check for Updates"), about)
+        self.updateBtn.clicked.connect(self._check_update)
+        brow.addWidget(self.disclaimerBtn)
+        brow.addWidget(self.updateBtn)
+        brow.addStretch(1)
+        bl.addLayout(brow)
         root.addWidget(about)
 
+        # 作者（最底部）
+        author = SimpleCardWidget(self.view)
+        aul = QVBoxLayout(author)
+        aul.setContentsMargins(20, 16, 20, 16)
+        aul.addWidget(StrongBodyLabel(L("作者", "Author"), author))
+        self.homeBtn = PushButton(L("打开主页", "Open Homepage"), author)
+        self.homeBtn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(AUTHOR_URL)))
+        aul.addWidget(SettingRow(AUTHOR_NAME,
+                                 L(f"GitHub 主页：{AUTHOR_URL}", f"GitHub homepage: {AUTHOR_URL}"),
+                                 self.homeBtn, author))
+        root.addWidget(author)
+
         root.addStretch(1)
+
+    def _check_update(self):
+        self.updateBtn.setEnabled(False)
+        self.updateBtn.setText(L("检查中…", "Checking…"))
+        from app.services.updater import check_for_updates as run_check
+
+        def _done():
+            self.updateBtn.setEnabled(True)
+            self.updateBtn.setText(L("检查更新", "Check for Updates"))
+
+        # check_for_updates 内部完成回调后界面即有提示，这里只恢复按钮状态
+        run_check(parent=self.window(), manual=True)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(4000, _done)
 
     def _theme_changed(self, checked):
         setTheme(Theme.DARK if checked else Theme.LIGHT)
