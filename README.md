@@ -36,7 +36,7 @@ NetPulse is a Windows desktop application for network stress testing and perform
 
 ### Install (End Users)
 
-1. Go to the [**Releases**](../../releases) page
+1. Go to the [**Releases**](https://github.com/Carlown/NetPulse/releases) page
 2. Download the latest `NetPulse-Setup-x.x.x.exe`
 3. Run the installer and follow the wizard (desktop shortcut optional)
 4. Launch from the Start menu or desktop
@@ -44,7 +44,7 @@ NetPulse is a Windows desktop application for network stress testing and perform
 ### Run from Source (Developers)
 
 ```bash
-git clone <this repository>
+git clone https://github.com/Carlown/NetPulse.git
 cd NetPulsePy
 pip install -r requirements.txt
 python main.py
@@ -101,7 +101,7 @@ NetPulse 是一款 Windows 桌面端的网络压力测试与性能监控工具�
 
 ### 安装（普通用户）
 
-1. 进入 [**Releases**](../../releases) 发布页
+1. 进入 [**Releases**](https://github.com/Carlown/NetPulse/releases) 发布页
 2. 下载最新的 `NetPulse-Setup-x.x.x.exe`
 3. 双击运行，按向导完成安装（可勾选桌面快捷方式）
 4. 安装后从开始菜单或桌面启动
@@ -109,7 +109,7 @@ NetPulse 是一款 Windows 桌面端的网络压力测试与性能监控工具�
 ### 从源码运行（开发者）
 
 ```bash
-git clone <本仓库地址>
+git clone https://github.com/Carlown/NetPulse.git
 cd NetPulsePy
 pip install -r requirements.txt
 python main.py
