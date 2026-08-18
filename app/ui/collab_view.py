@@ -19,6 +19,7 @@ from app.ui.stress_view import MiniStat
 
 class CollabView(ScrollArea):
     _net_info_ready = Signal(dict)
+    _join_result_ready = Signal(bool, str, str)  # ok, msg, code
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,6 +81,11 @@ class CollabView(ScrollArea):
         self.inviteBtn.setStyleSheet("font-size:22px; font-weight:700; padding:6px 24px;")
         hl.addWidget(self.inviteBtn)
 
+        # 邀请码有效期提示
+        self.inviteValidHint = CaptionLabel("", self.hostCard)
+        self.inviteValidHint.setWordWrap(True)
+        hl.addWidget(self.inviteValidHint)
+
         # 中继模式提示
         self.relayHint = CaptionLabel("", self.hostCard)
         self.relayHint.setWordWrap(True)
@@ -137,6 +143,8 @@ class CollabView(ScrollArea):
         self.codeEdit = LineEdit(self.nodeCard)
         self.codeEdit.setPlaceholderText("ABC123")
         nl.addWidget(self.codeEdit)
+        nl.addWidget(CaptionLabel(L("💡 邀请码生成后 5 分钟内有效，请在有效期内加入",
+                                    "💡 Invite code is valid for 5 minutes after generation; join within that window"), self.nodeCard))
         nl.addWidget(BodyLabel(L("节点名称", "Node Name"), self.nodeCard))
         self.nameEdit = LineEdit(self.nodeCard)
         import socket as _s
@@ -187,6 +195,7 @@ class CollabView(ScrollArea):
 
         # 信号
         self._net_info_ready.connect(self._on_net_info)
+        self._join_result_ready.connect(self._on_join_result)
         collab_server.log_msg.connect(self._server_log)
         collab_server.nodes_changed.connect(self._update_node_stats)
         collab_client.status_msg.connect(lambda m: self._client_log(m))
@@ -408,15 +417,24 @@ class CollabView(ScrollArea):
                             parent=self.window())
             return
 
-        ok, msg = collab_client.join(host, code, name, use_relay=use_relay)
+        self.joinBtn.setEnabled(False)
+        self._client_log(L("正在连接...", "Connecting..."))
+
+        def _do_join():
+            ok, msg = collab_client.join(host, code, name, use_relay=use_relay)
+            self._join_result_ready.emit(ok, msg, code)
+        threading.Thread(target=_do_join, daemon=True).start()
+
+    def _on_join_result(self, ok: bool, msg: str, code: str):
+        """加入操作完成后在主线程回调"""
         if ok:
-            self.joinBtn.setEnabled(False)
             self.leaveBtn.setEnabled(True)
             self.connCombo.setEnabled(False)
             self.roleCombo.setEnabled(False)
             self._client_log(L(f"已加入，邀请码 {code}", f"Joined with code {code}"))
-            log.info(f"加入协同: code={code} relay={use_relay}")
+            log.info(f"加入协同: code={code}")
         else:
+            self.joinBtn.setEnabled(True)
             InfoBar.error(L("加入失败", "Join failed"), msg, parent=self.window())
 
     def _leave(self):
@@ -457,7 +475,23 @@ class CollabView(ScrollArea):
         }
 
     def _tick_stats(self):
-        """每秒：节点上报本地统计，主控刷新聚合显示。"""
+        """每秒：节点上报本地统计，主控刷新聚合显示 + 更新邀请码倒计时。"""
+        # 更新邀请码有效期倒计时
+        remaining = collab_server.invite_remaining_seconds()
+        if remaining >= 0:
+            if remaining > 0:
+                mins = remaining // 60
+                secs = remaining % 60
+                self.inviteValidHint.setText(L(
+                    f"⏱ 邀请码有效期：{mins}分{secs:02d}秒（已加入节点不受影响，过期后新节点无法加入）",
+                    f"⏱ Invite code expires in: {mins}m {secs:02d}s (joined nodes stay connected; new nodes cannot join after expiry)"))
+            else:
+                self.inviteValidHint.setText(L(
+                    "⏱ 邀请码已过期（已加入节点不受影响，新节点无法加入）",
+                    "⏱ Invite code expired (joined nodes stay connected; new nodes cannot join)"))
+        else:
+            self.inviteValidHint.setText("")
+
         # 节点侧：如果已连接，上报当前统计
         if collab_client.connected:
             collab_client.send_stats(self._local_stats)

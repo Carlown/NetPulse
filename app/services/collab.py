@@ -98,6 +98,12 @@ class CollabServer(QObject):
     def invite_valid(self):
         return self._code and time.time() < self._expiry
 
+    def invite_remaining_seconds(self):
+        """返回邀请码剩余有效秒数，-1 表示没有活跃房间。"""
+        if not self._code:
+            return -1
+        return max(0, int(self._expiry - time.time()))
+
     @property
     def relay_mode(self):
         return self._relay_mode
@@ -114,7 +120,8 @@ class CollabServer(QObject):
         self._relay_mode = use_relay
 
         if use_relay:
-            self._start_relay_host()
+            # MQTT 连接放到后台线程，不阻塞 UI
+            threading.Thread(target=self._start_relay_host, daemon=True).start()
         else:
             self._start_listen()
         return self._code
@@ -148,7 +155,22 @@ class CollabServer(QObject):
         """关闭所有连接和监听。"""
         self.active = False
         # MQTT 中继先清理（需要 self._code 来发送房间关闭通知）
-        self._cleanup_relay()
+        # 把清理放到后台线程，避免阻塞 UI（sleep + disconnect 都是阻塞操作）
+        old_client = self._mqtt_client
+        old_code = self._code
+        self._mqtt_client = None
+        if old_client is not None:
+            def _async_cleanup():
+                try:
+                    if old_code:
+                        old_client.publish(_topic_node(old_code),
+                                          json.dumps({"type": "room_closed"}), qos=1)
+                        time.sleep(0.2)
+                    old_client.loop_stop()
+                    old_client.disconnect()
+                except Exception:
+                    pass
+            threading.Thread(target=_async_cleanup, daemon=True).start()
         self._code = None
         # TCP 直连
         if self._listen_sock:
@@ -165,6 +187,8 @@ class CollabServer(QObject):
                 v["sock"].close()
             except OSError:
                 pass
+        with self._lock:
+            self._relay_nodes.clear()
 
     def relay_addr_display(self):
         return L("公共 MQTT 中继 (broker.hivemq.com)",
@@ -529,20 +553,24 @@ class CollabClient(QObject):
     def _cleanup_relay(self):
         self._relay_connected = False
         self.connected = False
-        if self._mqtt_client:
-            try:
-                if self._relay_code and self._relay_node_id:
-                    self._mqtt_client.publish(_topic_host(self._relay_code), json.dumps({
-                        "type": "leave",
-                        "node_id": self._relay_node_id
-                    }), qos=1)
-                    # 给后台线程一点时间发送离开消息
-                    time.sleep(0.15)
-                self._mqtt_client.loop_stop()
-                self._mqtt_client.disconnect()
-            except Exception:
-                pass
-            self._mqtt_client = None
+        client = self._mqtt_client
+        code = self._relay_code
+        node_id = self._relay_node_id
+        self._mqtt_client = None
+        if client:
+            def _async_client_cleanup():
+                try:
+                    if code and node_id:
+                        client.publish(_topic_host(code), json.dumps({
+                            "type": "leave",
+                            "node_id": node_id
+                        }), qos=1)
+                        time.sleep(0.15)
+                    client.loop_stop()
+                    client.disconnect()
+                except Exception:
+                    pass
+            threading.Thread(target=_async_client_cleanup, daemon=True).start()
         self._relay_code = None
         self._relay_node_id = None
         self._relay_name = None
