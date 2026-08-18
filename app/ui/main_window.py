@@ -87,10 +87,19 @@ class MainWindow(FluentWindow):
             self._show_from_tray()
 
     def _show_from_tray(self):
-        """从托盘显示窗口。"""
-        self.showNormal()
+        """从托盘/最小化状态恢复显示窗口。"""
+        from PySide6.QtCore import Qt
+        # 如果窗口被隐藏（关闭时最小化到托盘的情况），先显示出来
+        if not self.isVisible():
+            self.show()
+        # 如果窗口最小化了，恢复正常大小
+        if self.isMinimized():
+            self.showNormal()
+        # 激活窗口并置于最前
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
         self.activateWindow()
         self.raise_()
+        self.show()
 
     def _quit_app(self):
         """从托盘退出应用。"""

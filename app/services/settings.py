@@ -44,8 +44,8 @@ class AppSettings:
             if os.path.exists(self.path):
                 with open(self.path, "r", encoding="utf-8") as f:
                     self._data.update(json.load(f))
-                # 一次性迁移：旧配置的固定语言改为跟随系统
-                if not self._data.pop("_lang_migrated", False):
+                # 一次性迁移：旧配置的固定语言改为跟随系统（仅在从未迁移过时执行）
+                if not self._data.get("_lang_migrated", False):
                     self._data["language"] = "auto"
                     self._data["_lang_migrated"] = True
                     self.save()
