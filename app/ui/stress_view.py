@@ -1,6 +1,9 @@
 """压力测试页：左侧配置 + 右侧实时统计与报告。"""
+import json
+import time as _time
+
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             InfoBarPosition, MessageBox,
@@ -8,7 +11,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             ScrollArea, SimpleCardWidget, Slider, SpinBox,
                             StrongBodyLabel, SubtitleLabel, TextEdit)
 
-from app.services.auth import add_authorized, is_authorized, normalize_host, remove_authorized
+from app.services.auth import add_authorized, is_authorized, normalize_host
 from app.services.logger import log
 from app.services.settings import settings
 from app.services.stress import engine
@@ -16,6 +19,7 @@ from app.ui.disclaimer import AuthDialog
 from app.ui.i18n import L
 
 HIGH_RATE = 500  # 高速率二次确认阈值
+CONFIG_VERSION = 1  # 配置文件格式版本，用于将来兼容
 
 # 错误码 -> 双语文案（引擎只存错误码，这里按当前语言翻译）
 _ERR_TEXT = {
@@ -97,6 +101,7 @@ class StressView(ScrollArea):
 
         engine.snapshot.connect(self._on_snapshot)
         engine.report_ready.connect(self._on_report)
+        self._dur_unit_idx = 0  # 持续时间单位索引（秒/分/时/天）
         self._restore_form()
 
     def _restore_form(self):
@@ -123,6 +128,8 @@ class StressView(ScrollArea):
                 self.durUnitCombo.setCurrentIndex(self._dur_unit_idx)
                 self.durSpin.setRange(1, self.DUR_MAX[self._dur_unit_idx])
                 self.durSpin.setValue(int(f["dur"]))
+            if f.get("headers"):
+                self.headersEdit.setPlainText(str(f["headers"]))
         except Exception:
             pass
 
@@ -136,7 +143,156 @@ class StressView(ScrollArea):
             "rate": self.rateSpin.value(),
             "dur": self.durSpin.value(),
             "dur_unit": max(0, self.durUnitCombo.currentIndex()),
+            "headers": self.headersEdit.toPlainText().strip(),
         })
+
+    # 持续时间单位：索引 → 字符串标识（导入导出用，比索引更稳定）
+    _DUR_UNIT_NAMES = ("sec", "min", "hour", "day")
+
+    def _collect_config(self) -> dict:
+        """从当前表单收集配置数据为 dict（用于导出）。"""
+        targets = [ln.strip() for ln in self.targetEdit.toPlainText().splitlines() if ln.strip()]
+        dur_idx = max(0, self.durUnitCombo.currentIndex())
+        headers_raw = self.headersEdit.toPlainText().strip()
+        try:
+            headers = json.loads(headers_raw) if headers_raw else {}
+        except (json.JSONDecodeError, ValueError):
+            headers = {}  # 导出时遇到非法 JSON 就置空，不报错
+        return {
+            "version": CONFIG_VERSION,
+            "targets": targets,
+            "port": self.portSpin.value(),
+            "protocol": self.protoCombo.currentText(),
+            "threads": self.threadSpin.value(),
+            "rate": self.rateSpin.value(),
+            "duration_value": self.durSpin.value(),
+            "duration_unit": self._DUR_UNIT_NAMES[dur_idx],
+            "headers": headers,
+        }
+
+    def _apply_config(self, cfg: dict) -> bool:
+        """将配置 dict 填充到表单。返回 True 表示成功。"""
+        try:
+            # 校验必填字段
+            if not isinstance(cfg.get("targets"), list) or not cfg["targets"]:
+                InfoBar.warning(L("配置无效", "Invalid Config"),
+                                L("配置文件缺少目标地址", "Config file is missing targets"),
+                                parent=self.window())
+                return False
+            # 协议白名单
+            proto = str(cfg.get("protocol", "HTTP")).upper()
+            valid_protos = {"HTTP", "HTTPS", "TCP", "UDP", "ICMP"}
+            if proto not in valid_protos:
+                proto = "HTTP"
+            # 持续时间单位
+            dur_unit_name = str(cfg.get("duration_unit", "sec"))
+            dur_idx = self._DUR_UNIT_NAMES.index(dur_unit_name) if dur_unit_name in self._DUR_UNIT_NAMES else 0
+            dur_val = int(cfg.get("duration_value", 30))
+            dur_val = max(1, min(dur_val, self.DUR_MAX[dur_idx]))
+            # 填充表单
+            self.targetEdit.setPlainText("\n".join(str(t) for t in cfg["targets"]))
+            idx = self.protoCombo.findText(proto)
+            if idx >= 0:
+                self.protoCombo.setCurrentIndex(idx)
+            self.portSpin.setValue(int(cfg.get("port", 80)))
+            self.threadSpin.setValue(int(cfg.get("threads", settings.default_threads)))
+            self.rateSpin.setValue(int(cfg.get("rate", settings.default_rate)))
+            self._dur_unit_idx = dur_idx
+            self.durUnitCombo.setCurrentIndex(dur_idx)
+            self.durSpin.setRange(1, self.DUR_MAX[dur_idx])
+            self.durSpin.setValue(dur_val)
+            # 请求头
+            headers = cfg.get("headers", {})
+            if isinstance(headers, dict) and headers:
+                self.headersEdit.setPlainText(json.dumps(headers, ensure_ascii=False, indent=2))
+            else:
+                self.headersEdit.setPlainText("")
+            self._save_form()  # 同步持久化
+            return True
+        except Exception as e:
+            InfoBar.error(L("导入失败", "Import Failed"),
+                          L(f"配置文件格式错误：{e}", f"Bad config format: {e}"),
+                          parent=self.window())
+            return False
+
+    def _export_config(self):
+        """导出当前配置为 JSON 文件。"""
+        targets = [ln.strip() for ln in self.targetEdit.toPlainText().splitlines() if ln.strip()]
+        if not targets:
+            InfoBar.warning(L("无法导出", "Cannot Export"),
+                            L("请至少填写一个目标地址", "Enter at least one target before exporting"),
+                            parent=self.window())
+            return
+        # 生成默认文件名（第一个目标 + 时间戳），清理 Windows 文件名非法字符
+        first = targets[0]
+        for ch in ('\\', '/', ':', '*', '?', '"', '<', '>', '|', '#', '&', '%'):
+            first = first.replace(ch, '_')
+        first = first.replace("https___", "").replace("http___", "").strip("_")
+        first = first[:40]  # 防止文件名过长
+        ts = _time.strftime("%Y%m%d_%H%M%S")
+        default_name = f"netpulse_{first}_{ts}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(),
+            L("导出配置", "Export Config"),
+            default_name,
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        cfg = self._collect_config()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            InfoBar.success(L("导出成功", "Exported"),
+                            L(f"已保存到 {path}", f"Saved to {path}"),
+                            parent=self.window(), position=InfoBarPosition.TOP, duration=3000)
+            log.info(f"配置已导出: {path}")
+        except OSError as e:
+            InfoBar.error(L("导出失败", "Export Failed"),
+                          L(f"无法写入文件：{e}", f"Cannot write file: {e}"),
+                          parent=self.window())
+
+    def _import_config(self):
+        """从 JSON 文件导入配置并填充表单。"""
+        if engine.running:
+            InfoBar.warning(L("无法导入", "Cannot Import"),
+                            L("测试正在运行中，请先停止", "Test is running; stop it first"),
+                            parent=self.window())
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(),
+            L("导入配置", "Import Config"),
+            "",
+            "JSON (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            InfoBar.error(L("导入失败", "Import Failed"),
+                          L(f"无法读取文件：{e}", f"Cannot read file: {e}"),
+                          parent=self.window())
+            return
+        if not isinstance(cfg, dict):
+            InfoBar.error(L("导入失败", "Import Failed"),
+                          L("配置文件格式无效", "Config file has invalid format"),
+                          parent=self.window())
+            return
+        # 版本兼容检查（将来有新版本可做迁移）
+        ver = cfg.get("version", 0)
+        if ver > CONFIG_VERSION:
+            InfoBar.warning(L("版本提示", "Version Notice"),
+                            L(f"配置文件来自更新版本的 NetPulse（v{ver}），部分设置可能无法识别。",
+                              f"Config is from a newer NetPulse (v{ver}); some settings may be ignored."),
+                            parent=self.window(), duration=4000)
+        if self._apply_config(cfg):
+            n = len(cfg.get("targets", []))
+            InfoBar.success(L("导入成功", "Imported"),
+                            L(f"已加载 {n} 个目标配置", f"Loaded {n} target(s)"),
+                            parent=self.window(), position=InfoBarPosition.TOP, duration=3000)
+            log.info(f"配置已导入: {path}")
 
     # ---------- 构建界面 ----------
 
@@ -221,6 +377,18 @@ class StressView(ScrollArea):
         self.authListLabel.setWordWrap(True)
         lay.addWidget(self.authListLabel)
         self.refresh_auth_list()
+
+        # 导入/导出配置按钮
+        lay.addSpacing(6)
+        io_row = QHBoxLayout()
+        self.exportBtn = PushButton(L("导出配置", "Export Config"), card)
+        self.exportBtn.clicked.connect(self._export_config)
+        self.importBtn = PushButton(L("导入配置", "Import Config"), card)
+        self.importBtn.clicked.connect(self._import_config)
+        io_row.addWidget(self.importBtn)
+        io_row.addWidget(self.exportBtn)
+        io_row.addStretch(1)
+        lay.addLayout(io_row)
         return card
 
     def _wrap(self, label, widget):
@@ -390,8 +558,8 @@ class StressView(ScrollArea):
 
         port = self.portSpin.value()
         try:
-            headers = json_loads(self.headersEdit.toPlainText()) if self.headersEdit.toPlainText().strip() else {}
-        except ValueError:
+            headers = json.loads(self.headersEdit.toPlainText()) if self.headersEdit.toPlainText().strip() else {}
+        except json.JSONDecodeError:
             InfoBar.warning(L("请求头格式错误", "Invalid headers"),
                             L("请求头须为合法 JSON", "Headers must be valid JSON"), parent=self.window())
             return
@@ -501,8 +669,3 @@ class StressView(ScrollArea):
         idx = self.protoCombo.findText(protocol)
         if idx >= 0:
             self.protoCombo.setCurrentIndex(idx)
-
-
-def json_loads(s):
-    import json
-    return json.loads(s)

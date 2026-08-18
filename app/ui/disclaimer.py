@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import BodyLabel, CheckBox, MessageBoxBase, SubtitleLabel, TextEdit
 
-from app.ui.i18n import L
+from app.ui.i18n import L, current_lang
 
 DISCLAIMER_ZH = (
     "本工具仅用于对您拥有所有权或已获得书面授权的目标进行性能测试。\n\n"
@@ -24,11 +24,15 @@ DISCLAIMER_EN = (
 )
 
 
+def _disclaimer_text():
+    return DISCLAIMER_ZH if current_lang() == "zh-CN" else DISCLAIMER_EN
+
+
 class DisclaimerDialog(MessageBoxBase):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.titleLabel = SubtitleLabel(L("免责声明与使用条款", "Disclaimer & Terms of Use"), self)
-        self.contentLabel = BodyLabel(DISCLAIMER_ZH if settings_lang() else DISCLAIMER_EN, self)
+        self.contentLabel = BodyLabel(_disclaimer_text(), self)
         self.contentLabel.setWordWrap(True)
         self.agreeBox = CheckBox(L("我已知晓并同意以上全部条款", "I have read and agree to all terms above"), self)
 
@@ -80,8 +84,3 @@ class AuthDialog(MessageBoxBase):
     def _check(self):
         self.yesButton.setEnabled(self.cb1.isChecked() and self.cb2.isChecked()
                                   and len(self.note()) >= 3)
-
-
-def settings_lang():
-    from app.services.settings import settings
-    return settings.language == "zh-CN"
