@@ -57,6 +57,12 @@ class SettingsView(ScrollArea):
         self.darkSwitch.checkedChanged.connect(self._theme_changed)
         al.addWidget(SettingRow(L("深色模式", "Dark mode"),
                                 L("Fluent 深色主题", "Fluent dark theme"), self.darkSwitch, appear))
+        self.traySwitch = SwitchButton()
+        self.traySwitch.setChecked(settings.minimize_to_tray)
+        self.traySwitch.checkedChanged.connect(
+            lambda v: settings.set("minimize_to_tray", v))
+        al.addWidget(SettingRow(L("关闭时最小化到托盘", "Minimize to tray on close"),
+                                L("关闭窗口时程序将驻留系统托盘", "Keep app running in system tray when closing window"), self.traySwitch, appear))
         self.langCombo = ComboBox()
         self.langCombo.addItems([L("跟随系统", "Auto (system)"), "简体中文", "English"])
         self.langCombo.setCurrentIndex(

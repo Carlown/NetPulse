@@ -17,6 +17,7 @@ class AppSettings:
         "disclaimer_accepted": False,
         "authorized": [],             # [{host, note, ts}]
         "stress_form": {},            # 上次压测表单：{target, port, protocol, threads, rate, dur, dur_unit}
+        "minimize_to_tray": True,     # 关闭时最小化到托盘
     }
 
     def __init__(self):
