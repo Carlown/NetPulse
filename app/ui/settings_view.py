@@ -217,10 +217,10 @@ class SettingsView(ScrollArea):
             self.updateBtn.setEnabled(True)
             self.updateBtn.setText(L("检查更新", "Check for Updates"))
 
-        # check_for_updates 内部完成回调后界面即有提示，这里只恢复按钮状态
-        run_check(parent=self.window(), manual=True)
+        # 使用回调在检查完成后恢复按钮状态，同时设置10秒安全超时
+        run_check(parent=self.window(), manual=True, on_finished=_done)
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(4000, _done)
+        QTimer.singleShot(10000, _done)
 
     def _theme_changed(self, checked):
         setTheme(Theme.DARK if checked else Theme.LIGHT)

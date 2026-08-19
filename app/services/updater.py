@@ -4,7 +4,7 @@ import threading
 import requests
 from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QLabel, QWidget
 
 APP_VERSION = "1.0.6"
 REPO = "Carlown/NetPulse"
@@ -57,17 +57,23 @@ class _Checker(QObject):
             self.done.emit({"ok": False, "error": str(e)})
 
 
-def check_for_updates(parent=None, manual: bool = False):
+def check_for_updates(parent=None, manual: bool = False, on_finished=None):
     """后台检查 GitHub 最新 Release。
 
     manual=False（启动自动检查）：仅在有新版本且未跳过时弹窗；
     manual=True（设置页手动检查）：无论结果都给出提示。
+    on_finished: 检查完成后的回调（无论成功失败）。
     """
     from app.ui.i18n import L
     from app.services.settings import settings
 
     # 自动检查：如果用户关闭了自动检查，直接返回
     if not manual and not settings.auto_check_updates:
+        if on_finished:
+            try:
+                on_finished()
+            except Exception:
+                pass
         return
 
     c = _Checker()
@@ -75,28 +81,39 @@ def check_for_updates(parent=None, manual: bool = False):
 
     def on_done(d):
         try:
-            _keep_alive.remove(c)
-        except ValueError:
-            pass
-        if not d.get("ok"):
-            if manual:
-                from qfluentwidgets import InfoBar
-                InfoBar.error(L("检查更新失败", "Update check failed"),
-                              L(f"无法连接 GitHub：{d.get('error', '')}",
-                                f"Cannot reach GitHub: {d.get('error', '')}"),
-                              parent=parent, duration=5000)
-            return
-        if d.get("newer"):
-            # 自动检查时，如果该版本已被用户跳过，不再弹窗
-            if not manual and settings.skip_version == d["tag"]:
-                return
-            _show_update_dialog(parent, d["tag"], d["url"], L)
-        elif manual:
-            from qfluentwidgets import InfoBar
-            InfoBar.success(L("已是最新版本", "Up to date"),
-                            L(f"当前版本 v{APP_VERSION}，与 GitHub 最新版本一致。",
-                              f"You are on the latest version (v{APP_VERSION})."),
-                            parent=parent, duration=4000)
+            try:
+                _keep_alive.remove(c)
+            except ValueError:
+                pass
+            try:
+                if not d.get("ok"):
+                    if manual:
+                        from qfluentwidgets import InfoBar
+                        InfoBar.error(L("检查更新失败", "Update check failed"),
+                                      L(f"无法连接 GitHub：{d.get('error', '')}",
+                                        f"Cannot reach GitHub: {d.get('error', '')}"),
+                                      parent=parent, duration=5000)
+                elif d.get("newer"):
+                    # 自动检查时，如果该版本已被用户跳过，不再弹窗
+                    if not manual and settings.skip_version == d["tag"]:
+                        pass
+                    else:
+                        _show_update_dialog(parent, d["tag"], d["url"], L)
+                elif manual:
+                    from qfluentwidgets import InfoBar
+                    InfoBar.success(L("已是最新版本", "Up to date"),
+                                    L(f"当前版本 v{APP_VERSION}，与 GitHub 最新版本一致。",
+                                      f"You are on the latest version (v{APP_VERSION})."),
+                                    parent=parent, duration=4000)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        finally:
+            if on_finished:
+                try:
+                    on_finished()
+                except Exception:
+                    pass
 
     c.done.connect(on_done)
     c.go()
