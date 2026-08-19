@@ -1,6 +1,6 @@
 ; NetPulse 安装程序脚本（Inno Setup 7）
 #define MyAppName "NetPulse"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "NetPulse"
 #define MyAppExeName "NetPulse.exe"
 
@@ -14,7 +14,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=installer
-OutputBaseFilename=NetPulse-Setup-1.0.4
+OutputBaseFilename=NetPulse-Setup-1.0.5
 SetupIconFile=app.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -53,8 +53,8 @@ Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescripti
 Source: "dist\NetPulse.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\NetPulse"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "NetPulse 网络压力测试工具"
+Name: "{autodesktop}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "NetPulse 网络压力测试工具"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "运行 NetPulse"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "运行 NetPulse"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

@@ -6,7 +6,7 @@ import time
 
 class AppSettings:
     DEFAULTS = {
-        "theme": "dark",              # dark / light
+        "theme": "light",             # dark / light
         "language": "auto",            # auto（跟随系统）/ zh-CN / en-US
         "default_threads": 8,
         "default_timeout_ms": 5000,

@@ -2,14 +2,15 @@
 import json
 import time as _time
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             InfoBarPosition, MessageBox,
                             PrimaryPushButton, ProgressBar, PushButton,
                             ScrollArea, SimpleCardWidget, Slider, SpinBox,
-                            StrongBodyLabel, SubtitleLabel, TextEdit)
+                            StrongBodyLabel, SubtitleLabel, TextEdit,
+                            isDarkTheme)
 
 from app.services.auth import add_authorized, is_authorized, normalize_host
 from app.services.logger import log
@@ -59,6 +60,14 @@ def fmt_bytes(n: float) -> str:
     return f"{n:.2f} PB"
 
 
+def _subtle_text_color() -> str:
+    """次要文字颜色，根据主题返回。"""
+    if isDarkTheme():
+        return "#AAAAAA"
+    else:
+        return "#666666"
+
+
 class MiniStat(QLabel):
     def __init__(self, color, parent=None):
         super().__init__("--", parent)
@@ -101,7 +110,13 @@ class StressView(ScrollArea):
 
         engine.snapshot.connect(self._on_snapshot)
         engine.report_ready.connect(self._on_report)
+        engine.started.connect(self._on_engine_started)
+        engine.stopping.connect(self._on_engine_stopping)
         self._dur_unit_idx = 0  # 持续时间单位索引（秒/分/时/天）
+        self._waiting_start = False
+        self._startup_busy = False   # 是否正在显示启动等待遮罩
+        self._startup_configs = None # 延迟启动时暂存配置
+        self._num_targets = 1
         self._restore_form()
 
     def _restore_form(self):
@@ -424,8 +439,8 @@ class StressView(ScrollArea):
         self.mFail = MiniStat("#D13438", card)
         self.mQps = MiniStat("#0078D4", card)
         self.mAvg = MiniStat("#8764B8", card)
-        self.mActive = MiniStat("#6B6B6B", card)
         self.mTx = MiniStat("#00B7C3", card)
+        self.mActive = MiniStat(_subtle_text_color(), card)
         grid.addWidget(self._mini(L("已发送", "Sent"), self.mTotal), 0, 0)
         grid.addWidget(self._mini(L("成功", "Success"), self.mSuccess), 0, 1)
         grid.addWidget(self._mini(L("失败", "Failed"), self.mFail), 0, 2)
@@ -583,29 +598,91 @@ class StressView(ScrollArea):
         hosts = ", ".join(c["target"] for c in configs)
         log.info(f"开始压测({len(configs)}目标): {hosts} threads={configs[0]['threads']} "
                  f"rate={rate} duration={configs[0]['duration']}s")
-        engine.start(configs)
+
+        # 立即切换UI状态，给用户即时反馈
         self.startBtn.setEnabled(False)
         self.stopBtn.setEnabled(True)
         n = len(configs)
-        self.statusLabel.setText(L("运行中", "Running") if n == 1
-                                 else L(f"运行中 · {n} 个目标", f"Running · {n} targets"))
+        self._num_targets = n
+        self.statusLabel.setText(L("启动中...", "Starting..."))
         self.progressBar.setValue(0)
+        self.mTotal.setText("0")
+        self.mSuccess.setText("0")
+        self.mFail.setText("0")
+        self.mQps.setText("0.0")
+        self.mAvg.setText("0.0")
+        self.mActive.setText("0")
         self.mTx.setText("0 B")
         self.errLabel.setText(L("最近失败原因：—", "Last error: —"))
         self.targetsLabel.setText("")
 
+        # 立即显示等待遮罩，给用户明确的"正在启动"反馈
+        total_threads = configs[0]["threads"] * n
+        win = self.window()
+        if hasattr(win, "show_busy"):
+            self._startup_busy = True
+            win.show_busy(L("正在启动压测...", "Starting stress test..."),
+                          L(f"正在创建 {total_threads} 个 worker 线程", f"Creating {total_threads} worker threads"))
+
+        # 延迟80ms再真正启动引擎，确保遮罩先完成渲染，避免UI无响应的感觉
+        self._startup_configs = configs
+        QTimer.singleShot(80, self._do_start_engine)
+
+    def _do_start_engine(self):
+        """延迟执行引擎启动，确保等待遮罩已渲染。"""
+        configs = self._startup_configs
+        self._startup_configs = None
+        ok = engine.start(configs)
+        if not ok:
+            self._hide_startup_busy()
+            self.startBtn.setEnabled(True)
+            self.stopBtn.setEnabled(False)
+            self.statusLabel.setText(L("就绪", "Ready"))
+            InfoBar.warning(L("启动失败", "Start failed"),
+                            L("无法启动压测，请检查配置", "Cannot start stress test, check configuration"),
+                            parent=self.window())
+            return
+        # 安全超时：5秒后强制隐藏遮罩（防止异常情况下遮罩永远不消失）
+        QTimer.singleShot(5000, self._hide_startup_busy)
+
+    def _hide_startup_busy(self):
+        """隐藏启动等待遮罩（确保只隐藏一次）。"""
+        if self._startup_busy:
+            self._startup_busy = False
+            win = self.window()
+            if hasattr(win, "hide_busy"):
+                win.hide_busy()
+
     def _stop(self):
+        # 如果还在启动阶段就点击停止，先清除启动遮罩标记（停止遮罩会覆盖它）
+        self._startup_busy = False
+        win = self.window()
+        if hasattr(win, "show_busy"):
+            win.show_busy(L("正在停止...", "Stopping..."),
+                          L("等待 worker 线程退出", "Waiting for worker threads to exit"))
         engine.stop()
         log.info("手动停止压测")
 
+    def _on_engine_started(self):
+        """所有 worker 线程已创建完成，更新状态文字。遮罩等真正开始跑数据时再隐藏。"""
+        n = self._num_targets
+        self.statusLabel.setText(L("运行中", "Running") if n == 1
+                                 else L(f"运行中 · {n} 个目标", f"Running · {n} targets"))
+
+    def _on_engine_stopping(self):
+        """引擎正在停止（等待所有 worker 退出）。"""
+        pass
+
     def _on_snapshot(self, d):
+        # 更新实时统计数据
         self.mTotal.setText(str(d["total"]))
         self.mSuccess.setText(str(d["success"]))
         self.mFail.setText(str(d["fail"]))
         self.mTx.setText(fmt_bytes(d.get("tx", 0)))
         self.mQps.setText(f"{d['qps']:.1f}")
         self.mAvg.setText(f"{d['avg']:.1f}")
-        self.mActive.setText(str(d["active"]))
+        active = d.get("active", 0)
+        self.mActive.setText(str(active))
         self.progressBar.setValue(int(d["progress"] * 100))
         last_err = d.get("last_error") or ""
         if last_err:
@@ -618,7 +695,18 @@ class StressView(ScrollArea):
                  for t in d.get("targets", [])]
         self.targetsLabel.setText("  |  ".join(parts))
 
+        # worker线程真正跑起来了（有活跃线程），隐藏启动遮罩
+        if self._startup_busy and active > 0:
+            self._hide_startup_busy()
+
     def _on_report(self, r):
+        # 压测结束，隐藏等待遮罩
+        self._waiting_start = False
+        self._startup_busy = False
+        win = self.window()
+        if hasattr(win, "hide_busy"):
+            win.hide_busy()
+
         self.startBtn.setEnabled(True)
         self.stopBtn.setEnabled(False)
         self.statusLabel.setText(L("已完成", "Completed"))

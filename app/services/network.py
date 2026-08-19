@@ -8,6 +8,8 @@ import subprocess
 
 import requests
 
+from app.ui.i18n import L
+
 PORT = 50505
 
 
@@ -65,7 +67,7 @@ def upnp_map(port: int = PORT):
         u = miniupnpc.UPnP()
         u.discoverdelay = 2000
         if u.discover() < 1:
-            return False, "未发现 UPnP 网关"
+            return False, L("未发现 UPnP 网关", "No UPnP gateway found")
         u.selectigd()
         external = u.externalipaddress()
         try:

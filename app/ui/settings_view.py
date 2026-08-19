@@ -1,11 +1,13 @@
 """设置页：主题/语言/默认参数/日志管理/检查更新/作者。"""
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QCursor, QFont
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel,
+                               QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             PushButton, ScrollArea, SimpleCardWidget, SpinBox,
                             StrongBodyLabel, SubtitleLabel, SwitchButton,
-                            setTheme, setThemeColor, Theme)
+                            setTheme, setThemeColor, Theme, IconWidget,
+                            FluentIcon, isDarkTheme)
 
 from app.services.logger import log
 from app.services.settings import settings
@@ -30,6 +32,42 @@ class SettingRow(QWidget):
         col.addWidget(d)
         lay.addLayout(col, 1)
         lay.addWidget(control)
+
+
+class ClickableCard(SimpleCardWidget):
+    """可点击的卡片，整个区域可点击，带悬停效果和右侧图标。"""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        self._hover = False  # 必须在 super().__init__ 之前初始化，因为父类会调用 _normalBackgroundColor()
+        super().__init__(parent)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def _normalBackgroundColor(self):
+        from qfluentwidgets import isDarkTheme
+        if isDarkTheme():
+            return QColor(255, 255, 255, 13) if not self._hover else QColor(255, 255, 255, 20)
+        else:
+            return QColor(255, 255, 255) if not self._hover else QColor(245, 245, 250)
+
+
+from PySide6.QtGui import QColor
 
 
 class SettingsView(ScrollArea):
@@ -137,17 +175,29 @@ class SettingsView(ScrollArea):
         bl.addLayout(brow)
         root.addWidget(about)
 
-        # 作者（最底部）
-        author = SimpleCardWidget(self.view)
-        aul = QVBoxLayout(author)
+        # 作者（可点击卡片，整个区域跳转）
+        author = ClickableCard(self.view)
+        author.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(AUTHOR_URL)))
+        aul = QHBoxLayout(author)
         aul.setContentsMargins(20, 16, 20, 16)
-        aul.addWidget(StrongBodyLabel(L("作者", "Author"), author))
-        self.homeBtn = PushButton(L("打开主页", "Open Homepage"), author)
-        self.homeBtn.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(AUTHOR_URL)))
-        aul.addWidget(SettingRow(AUTHOR_NAME,
-                                 L(f"GitHub 主页：{AUTHOR_URL}", f"GitHub homepage: {AUTHOR_URL}"),
-                                 self.homeBtn, author))
+        aul.setSpacing(12)
+        # 左侧：作者信息
+        info_col = QVBoxLayout()
+        info_col.setSpacing(2)
+        info_col.addWidget(StrongBodyLabel(L("作者", "Author"), author))
+        author_name = BodyLabel(AUTHOR_NAME, author)
+        author_name_font = QFont()
+        author_name_font.setPointSize(12)
+        author_name.setFont(author_name_font)
+        info_col.addWidget(author_name)
+        gh_label = CaptionLabel(L(f"GitHub 主页：{AUTHOR_URL}", f"GitHub: {AUTHOR_URL}"), author)
+        gh_label.setWordWrap(True)
+        info_col.addWidget(gh_label)
+        aul.addLayout(info_col, 1)
+        # 右侧：链接图标（自动适配主题色）
+        self.linkIcon = IconWidget(FluentIcon.LINK, author)
+        self.linkIcon.setFixedSize(24, 24)
+        aul.addWidget(self.linkIcon, 0, Qt.AlignVCenter)
         root.addWidget(author)
 
         root.addStretch(1)

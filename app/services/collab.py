@@ -55,7 +55,7 @@ def _connect_tcp(host, port, timeout=8):
                 s.close()
             except OSError:
                 pass
-    raise last_err if last_err else OSError(f"无法连接到 {host}:{port}")
+    raise last_err if last_err else OSError(L(f"无法连接到 {host}:{port}", f"Cannot connect to {host}:{port}"))
 
 
 def _parse_host_port(host_str, default_port=PORT):
@@ -73,11 +73,36 @@ def _parse_host_port(host_str, default_port=PORT):
     return host_str, default_port
 
 
+def _enable_tcp_keepalive(sock, idle_sec=60, interval_sec=30, count=3):
+    """启用 TCP keepalive，防止空闲连接被网络设备断开。"""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Windows 和 Linux/macOS 的 TCP keepalive 选项
+        if hasattr(socket, 'TCP_KEEPIDLE'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle_sec)
+        if hasattr(socket, 'TCP_KEEPINTVL'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval_sec)
+        if hasattr(socket, 'TCP_KEEPCNT'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, count)
+        # Windows 特定的 SIO_KEEPALIVE_VALS
+        try:
+            import struct
+            # SIO_KEEPALIVE_VALS = 0x98000004 (WSAIoctl)
+            idle_ms = idle_sec * 1000
+            interval_ms = interval_sec * 1000
+            sock.ioctl(0x98000004, struct.pack('IIII', 1, idle_ms, interval_ms))
+        except Exception:
+            pass
+    except (OSError, AttributeError):
+        pass
+
+
 # ========== 直连模式 TCP 服务端 ==========
 
 class CollabServer(QObject):
     log_msg = Signal(str)
     nodes_changed = Signal()
+    relay_status_changed = Signal(bool)  # True=已连接, False=断开/失败
 
     def __init__(self):
         super().__init__()
@@ -233,6 +258,7 @@ class CollabServer(QObject):
 
     def _client_loop(self, conn, addr):
         conn.settimeout(600)
+        _enable_tcp_keepalive(conn)
         sid = f"{addr[0]}:{addr[1]}"
         f = conn.makefile("r", encoding="utf-8")
         try:
@@ -248,15 +274,20 @@ class CollabServer(QObject):
                               and len(self._sessions) < self._max_nodes)
                         if ok:
                             self._sessions[sid] = {"sock": conn, "name": msg.get("name") or sid, "stats": None}
-                    try:
-                        conn.sendall(b'{"type":"joined"}\n')
-                    except OSError:
-                        break
                     if ok:
+                        try:
+                            conn.sendall(b'{"type":"joined"}\n')
+                        except OSError:
+                            break
                         name = msg.get('name') or sid
                         self.log_msg.emit(L(f"节点 {name} 已加入", f"Node {name} joined"))
                         self.nodes_changed.emit()
                     else:
+                        # 邀请码无效或房间已满：发送错误响应后断开
+                        try:
+                            conn.sendall(b'{"type":"error","msg":"invalid_code_or_full"}\n')
+                        except OSError:
+                            pass
                         break
                 elif t == "stats":
                     with self._lock:
@@ -269,7 +300,9 @@ class CollabServer(QObject):
             pass
         finally:
             with self._lock:
-                self._sessions.pop(sid, None)
+                node = self._sessions.pop(sid, None)
+            if node:
+                self.log_msg.emit(L(f"节点 {node['name']} 已断开", f"Node {node['name']} disconnected"))
             self.nodes_changed.emit()
             try:
                 conn.close()
@@ -302,9 +335,11 @@ class CollabServer(QObject):
                 relay_addr = self.relay_addr_display()
                 self.log_msg.emit(L(f"中继模式已就绪，邀请码 {self._code}（通过 {relay_addr}）",
                                     f"Relay ready, invite code {self._code} (via {relay_addr})"))
+                self.relay_status_changed.emit(True)
                 self.nodes_changed.emit()
             else:
                 self.log_msg.emit(L(f"中继连接失败: {reason_code}", f"Relay connection failed: {reason_code}"))
+                self.relay_status_changed.emit(False)
 
         def on_message(client, userdata, msg):
             """处理节点发来的消息。"""
@@ -351,12 +386,14 @@ class CollabServer(QObject):
                     self.nodes_changed.emit()
 
         def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
-            self._relay_connected = False
-            if self._relay_mode:
-                self.log_msg.emit(L("与中继服务器断开连接", "Disconnected from relay server"))
-                with self._lock:
-                    self._relay_nodes.clear()
-                self.nodes_changed.emit()
+            if self._relay_connected:
+                self._relay_connected = False
+                if self._relay_mode:
+                    self.log_msg.emit(L("与中继服务器断开连接", "Disconnected from relay server"))
+                    with self._lock:
+                        self._relay_nodes.clear()
+                    self.nodes_changed.emit()
+                self.relay_status_changed.emit(False)
 
         self._mqtt_client.on_connect = on_connect
         self._mqtt_client.on_message = on_message
@@ -368,6 +405,7 @@ class CollabServer(QObject):
             self.log_msg.emit(L("正在连接公共中继服务器...", "Connecting to public relay server..."))
         except Exception as e:
             self.log_msg.emit(L(f"中继连接失败: {e}", f"Relay connection failed: {e}"))
+            self.relay_status_changed.emit(False)
 
     def _relay_broadcast(self, obj):
         if self._mqtt_client and self._relay_connected:
@@ -441,6 +479,9 @@ class CollabClient(QObject):
         if resp.get("type") != "joined":
             s.close()
             return False, L("邀请码无效或已满员", "Invalid code or room full")
+        # 加入成功：设置较长的读超时（10分钟），并启用 TCP keepalive 防止空闲断开
+        s.settimeout(600)
+        _enable_tcp_keepalive(s)
         self._sock = s
         self.connected = True
         self._relay_mode = False
@@ -590,6 +631,14 @@ class CollabClient(QObject):
                 elif t == "stop":
                     self.stop_requested.emit()
                 elif t == "close":
+                    break
+                elif t == "error":
+                    err = msg.get("msg", "unknown_error")
+                    err_map = {
+                        "invalid_code_or_full": L("邀请码无效或房间已满", "Invalid code or room full"),
+                    }
+                    self.status_msg.emit(L(f"连接被拒绝: {err_map.get(err, err)}",
+                                           f"Connection rejected: {err_map.get(err, err)}"))
                     break
         except OSError:
             pass

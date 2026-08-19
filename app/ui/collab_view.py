@@ -75,15 +75,17 @@ class CollabView(ScrollArea):
         self.genBtn.clicked.connect(self._gen_invite)
         hl.addWidget(self.genBtn)
 
-        # 邀请码（点击即可复制）
+        # 邀请码（点击即可复制）—— 初始隐藏，生成邀请码后再显示
         self.inviteBtn = PushButton("-", self.hostCard)
         self.inviteBtn.clicked.connect(self._copy_invite)
         self.inviteBtn.setStyleSheet("font-size:22px; font-weight:700; padding:6px 24px;")
+        self.inviteBtn.hide()  # 初始隐藏
         hl.addWidget(self.inviteBtn)
 
-        # 邀请码有效期提示
+        # 邀请码有效期提示 —— 初始隐藏
         self.inviteValidHint = CaptionLabel("", self.hostCard)
         self.inviteValidHint.setWordWrap(True)
+        self.inviteValidHint.hide()  # 初始隐藏
         hl.addWidget(self.inviteValidHint)
 
         # 中继模式提示
@@ -91,9 +93,10 @@ class CollabView(ScrollArea):
         self.relayHint.setWordWrap(True)
         hl.addWidget(self.relayHint)
 
-        # 直连模式：地址信息（仅直连模式显示）
+        # 直连模式：地址信息（仅直连模式且有内容时显示）—— 初始隐藏
         self.addrLabel = BodyLabel("", self.hostCard)
         self.addrLabel.setWordWrap(True)
+        self.addrLabel.hide()  # 初始隐藏
         hl.addWidget(self.addrLabel)
         addr_row = QHBoxLayout()
         self.copyPubBtn = PushButton(L("复制公网地址", "Copy Public Address"), self.hostCard)
@@ -132,11 +135,11 @@ class CollabView(ScrollArea):
         nl.addWidget(self.nodeRelayHint)
 
         # 直连模式地址输入
-        self.hostLabel = BodyLabel(L("主控地址（内网或公网 IP，可带端口）", "Host address (LAN/WAN IP, port optional)"), self.nodeCard)
+        self.hostLabel = BodyLabel(L("主控地址（局域网 IP，可带端口）", "Host address (LAN IP, port optional)"), self.nodeCard)
         nl.addWidget(self.hostLabel)
         self.hostEdit = LineEdit(self.nodeCard)
-        self.hostEdit.setPlaceholderText(L("192.168.1.100:50505 或 1.2.3.4:50505",
-                                            "192.168.1.100:50505 or 1.2.3.4:50505"))
+        self.hostEdit.setPlaceholderText(L("192.168.1.100:50505",
+                                            "192.168.1.100:50505"))
         nl.addWidget(self.hostEdit)
 
         nl.addWidget(BodyLabel(L("邀请码", "Invite Code"), self.nodeCard))
@@ -198,10 +201,16 @@ class CollabView(ScrollArea):
         self._join_result_ready.connect(self._on_join_result)
         collab_server.log_msg.connect(self._server_log)
         collab_server.nodes_changed.connect(self._update_node_stats)
+        collab_server.relay_status_changed.connect(self._on_relay_status)
         collab_client.status_msg.connect(lambda m: self._client_log(m))
         collab_client.start_requested.connect(self._on_remote_start)
-        collab_client.stop_requested.connect(lambda: engine.stop())
+        collab_client.stop_requested.connect(self._on_remote_stop)
         engine.snapshot.connect(self._on_local_snapshot)
+        engine.report_ready.connect(self._on_remote_report)
+        engine.started.connect(self._on_remote_engine_started)
+        self._waiting_remote = False
+        self._startup_busy = False   # 远程启动时的等待遮罩标记
+        self._remote_start_config = None  # 延迟启动时暂存配置
 
         # 定时器：主控端定时聚合节点统计；节点端定时上报本地统计
         self._stat_timer = QTimer(self)
@@ -243,11 +252,16 @@ class CollabView(ScrollArea):
             self.adminBtn.hide()
         else:
             self.relayHint.setText(L(
-                "直连模式：节点需与主控在同一局域网，或主控有公网 IP 并放行防火墙。",
-                "Direct mode: nodes must be on the same LAN, or host has a public IP with firewall opened."))
-            self.addrLabel.show()
-            self.copyPubBtn.show()
-            self.copyLanBtn.show()
+                "直连模式：节点需与主控在同一局域网。",
+                "Direct mode: nodes must be on the same LAN as the host."))
+            # 只有当 addrLabel 有内容时才显示
+            if self.addrLabel.text().strip():
+                self.addrLabel.show()
+            else:
+                self.addrLabel.hide()
+            self.copyPubBtn.hide()  # 局域网模式不显示公网地址
+            self.copyLanBtn.hide()  # 生成邀请码后才显示复制按钮
+            self.adminBtn.hide()  # 局域网模式默认不需要特殊防火墙配置（子网内通常放行）
 
         # 节点侧
         if is_relay:
@@ -258,16 +272,23 @@ class CollabView(ScrollArea):
             self.hostEdit.hide()
         else:
             self.nodeRelayHint.setText(L(
-                "直连模式：请填写主控的 IP 地址和端口。",
-                "Direct mode: enter the host's IP address and port."))
+                "直连模式：请填写主控的局域网 IP 地址。",
+                "Direct mode: enter the host's LAN IP address."))
             self.hostLabel.show()
             self.hostEdit.show()
 
     def _gen_invite(self):
         use_relay = self._is_relay_mode()
+        if use_relay:
+            win = self.window()
+            if hasattr(win, "show_busy"):
+                win.show_busy(L("正在连接中继服务器...", "Connecting to relay server..."),
+                              L("请稍候", "Please wait"))
         code = collab_server.generate_invite(self.maxNodesSpin.value(), use_relay=use_relay)
         self._last_code = code
         self.inviteBtn.setText(code)
+        self.inviteBtn.show()  # 显示邀请码按钮
+        self.inviteValidHint.show()  # 显示有效期提示
         self.pushStartBtn.setEnabled(True)
         self.pushStopBtn.setEnabled(True)
 
@@ -275,12 +296,32 @@ class CollabView(ScrollArea):
             relay_addr = collab_server.relay_addr_display()
             self._server_log(L(f"已生成邀请码 {code}（中继模式，通过 {relay_addr} 中转）",
                                f"Invite generated: {code} (relay via {relay_addr})"))
+            # 中继模式显示公网复制按钮
+            self.copyPubBtn.show()
+            self.copyLanBtn.hide()
         else:
-            self._server_log(L("已生成邀请码，正在探测外网连通性…", "Invite generated; probing WAN connectivity…"))
-            self.addrLabel.setText(L("正在探测公网 IP、UPnP 映射与防火墙…（约数秒）",
-                                     "Detecting public IP, UPnP mapping & firewall… (a few seconds)"))
-            threading.Thread(target=self._probe_net, daemon=True).start()
+            # 直连局域网模式：只获取局域网IP，不探测公网
+            self._server_log(L("已生成邀请码（局域网直连模式）", "Invite generated (LAN direct mode)"))
+            lan = self._get_lan_ip_simple()
+            self._lan_addr = f"{lan}:{PORT}"
+            self._pub_addr = ""  # 局域网模式不使用公网地址
+            self.addrLabel.setText(L(
+                f"局域网地址：{self._lan_addr}  ← 内网节点连这个",
+                f"LAN address: {self._lan_addr}  ← for LAN nodes"))
+            self.addrLabel.show()  # 显示地址标签
+            self.copyLanBtn.show()  # 显示局域网复制按钮
         log.info("生成协同邀请码")
+
+    def _on_relay_status(self, connected: bool):
+        """中继服务器连接状态变化时的回调。"""
+        win = self.window()
+        if hasattr(win, "hide_busy"):
+            win.hide_busy()
+
+    def _get_lan_ip_simple(self):
+        """简单获取局域网IP，不进行公网探测。"""
+        from app.services.network import get_lan_ip
+        return get_lan_ip()
 
     def _probe_net(self):
         """后台线程：探测公网 IP + UPnP 自动端口映射 + 防火墙放行。"""
@@ -327,6 +368,11 @@ class CollabView(ScrollArea):
             lines.append(L(f"防火墙：尚未放行 TCP {PORT}，点击下方按钮以管理员身份重启后自动放行",
                            f"Firewall: TCP {PORT} not allowed yet; click the button below to elevate"))
         self.addrLabel.setText("\n".join(lines))
+        self.addrLabel.show()  # 有内容了，显示地址标签
+        # 显示复制按钮（如果有公网地址显示公网复制，否则只显示局域网复制）
+        if self._pub_addr:
+            self.copyPubBtn.show()
+        self.copyLanBtn.show()
 
     def _restart_as_admin(self):
         """通过 UAC 以管理员身份重启本程序，以自动放行防火墙。"""
@@ -420,6 +466,16 @@ class CollabView(ScrollArea):
         self.joinBtn.setEnabled(False)
         self._client_log(L("正在连接...", "Connecting..."))
 
+        # 显示加载遮罩
+        win = self.window()
+        if hasattr(win, "show_busy"):
+            if use_relay:
+                win.show_busy(L("正在连接中继服务器...", "Connecting to relay server..."),
+                              L("请稍候", "Please wait"))
+            else:
+                win.show_busy(L("正在连接主控...", "Connecting to host..."),
+                              L("请稍候", "Please wait"))
+
         def _do_join():
             ok, msg = collab_client.join(host, code, name, use_relay=use_relay)
             self._join_result_ready.emit(ok, msg, code)
@@ -427,6 +483,11 @@ class CollabView(ScrollArea):
 
     def _on_join_result(self, ok: bool, msg: str, code: str):
         """加入操作完成后在主线程回调"""
+        # 隐藏加载遮罩
+        win = self.window()
+        if hasattr(win, "hide_busy"):
+            win.hide_busy()
+
         if ok:
             self.leaveBtn.setEnabled(True)
             self.connCombo.setEnabled(False)
@@ -463,7 +524,55 @@ class CollabView(ScrollArea):
         stress.threadSlider.setValue(threads)
         rate = config.get("rate", 100)
         stress.rateSpin.setValue(rate)
+
+        # 立即显示等待遮罩，给用户明确反馈
+        total_threads = threads
+        win = self.window()
+        if hasattr(win, "show_busy"):
+            self._startup_busy = True
+            win.show_busy(L("正在启动压测...", "Starting stress test..."),
+                          L(f"正在创建 {total_threads} 个 worker 线程", f"Creating {total_threads} worker threads"))
+
+        # 延迟80ms再启动引擎，确保遮罩先渲染
+        self._remote_start_config = config
+        QTimer.singleShot(80, self._do_remote_start)
+
+    def _do_remote_start(self):
+        """延迟执行远程引擎启动。"""
+        config = self._remote_start_config
+        self._remote_start_config = None
         engine.start([config])
+        # 安全超时：5秒后强制隐藏
+        QTimer.singleShot(5000, self._hide_startup_busy)
+
+    def _hide_startup_busy(self):
+        """隐藏远程启动等待遮罩（确保只隐藏一次）。"""
+        if self._startup_busy:
+            self._startup_busy = False
+            win = self.window()
+            if hasattr(win, "hide_busy"):
+                win.hide_busy()
+
+    def _on_remote_stop(self):
+        """收到主控停止指令。"""
+        win = self.window()
+        if hasattr(win, "show_busy"):
+            win.show_busy(L("正在停止...", "Stopping..."),
+                          L("等待 worker 线程退出", "Waiting for worker threads to exit"))
+        engine.stop()
+        self._client_log(L("收到主控指令，停止压测", "Received host command; stopping"))
+
+    def _on_remote_report(self, r):
+        """远程压测结束，隐藏等待遮罩。"""
+        self._waiting_remote = False
+        self._startup_busy = False
+        win = self.window()
+        if hasattr(win, "hide_busy"):
+            win.hide_busy()
+
+    def _on_remote_engine_started(self):
+        """远程启动的 worker 线程已创建完成。遮罩等真正跑起来再隐藏。"""
+        pass
 
     def _on_local_snapshot(self, d):
         """本地压测快照：节点端保存用于周期上报。"""
@@ -473,12 +582,16 @@ class CollabView(ScrollArea):
             "fail": d.get("fail", 0),
             "qps": d.get("qps", 0.0),
         }
+        # worker线程真正跑起来了（有活跃线程），隐藏启动遮罩
+        if self._startup_busy and d.get("active", 0) > 0:
+            self._hide_startup_busy()
 
     def _tick_stats(self):
         """每秒：节点上报本地统计，主控刷新聚合显示 + 更新邀请码倒计时。"""
         # 更新邀请码有效期倒计时
         remaining = collab_server.invite_remaining_seconds()
         if remaining >= 0:
+            self.inviteValidHint.show()
             if remaining > 0:
                 mins = remaining // 60
                 secs = remaining % 60
@@ -491,6 +604,7 @@ class CollabView(ScrollArea):
                     "⏱ Invite code expired (joined nodes stay connected; new nodes cannot join)"))
         else:
             self.inviteValidHint.setText("")
+            self.inviteValidHint.hide()
 
         # 节点侧：如果已连接，上报当前统计
         if collab_client.connected:

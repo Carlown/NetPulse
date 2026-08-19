@@ -82,6 +82,7 @@ def _http_req_bytes(r) -> int:
 class StressEngine(QObject):
     snapshot = Signal(dict)      # 周期性实时统计
     report_ready = Signal(dict)  # 结束后的汇总报告
+    ready = Signal()             # 所有 worker 线程已启动
 
     def __init__(self):
         super().__init__()
@@ -104,27 +105,40 @@ class StressEngine(QObject):
         self._threads = []
         self.errors = {}             # 失败原因 -> 次数
         self.last_error = ""         # 最近一次失败原因
+        self._start_event = threading.Event()  # 线程同步启动屏障
 
     def start(self, config: dict) -> bool:
+        """启动压测。线程创建在后台线程执行，ready 信号表示所有 worker 已就绪。"""
         if self.running:
             return False
         self._reset()
         self.config = config
         self._stop.clear()
         self.running = True
+        threading.Thread(target=self._launch_workers, args=(config,), daemon=True).start()
+        return True
+
+    def _launch_workers(self, config):
+        """在后台线程中创建并启动所有 worker，尽早开始发送快照让UI响应。"""
+        bucket = TokenBucket(config["rate"])
+        self._start_event.clear()
+        self._threads = []
+        # 先设置计时起点并启动监控线程，让UI立即收到快照反馈
         self._t0 = time.monotonic()
         self._end = self._t0 + config["duration"]
-        bucket = TokenBucket(config["rate"])
-        self._threads = []
+        threading.Thread(target=self._supervise, daemon=True).start()
+        # 创建所有线程（它们会在 _start_event 处等待）
         for _ in range(config["threads"]):
             t = threading.Thread(target=self._worker, args=(config, bucket), daemon=True)
             t.start()
             self._threads.append(t)
-        threading.Thread(target=self._supervise, daemon=True).start()
-        return True
+        # 所有线程已创建完成，放行所有 worker 统一开始
+        self._start_event.set()
+        self.ready.emit()
 
     def stop(self):
         self._stop.set()
+        self._start_event.set()  # 防止线程在等待启动事件时卡住
 
     # ---------- 内部 ----------
 
@@ -137,6 +151,14 @@ class StressEngine(QObject):
         st = {"sock": None}
         payload = b"X" * max(1, c["packet_size"])
         timeout = c["timeout"] / 1000.0
+
+        # 等待所有线程就绪后统一开始（同步屏障）
+        self._start_event.wait()
+        # 如果在等待期间收到了停止信号，直接退出
+        if self._stop.is_set():
+            if session:
+                session.close()
+            return
 
         while not self._stop.is_set() and time.monotonic() < self._end:
             if not bucket.acquire(1.0):
@@ -251,11 +273,21 @@ class StressEngine(QObject):
             return float(sum(b[1] for b in self._buckets))
 
     def _supervise(self):
+        poll_interval = 0.1  # 更频繁的检测间隔，UI更流畅、停止响应更快
+        stop_deadline = None
         while True:
             alive = any(t.is_alive() for t in self._threads)
             left = self._end - time.monotonic()
-            if self._stop.is_set() or (left <= 0 and not alive):
-                break
+            should_stop = self._stop.is_set() or left <= 0
+            if should_stop and stop_deadline is None:
+                # 刚进入停止阶段：设置总等待截止时间（1.5秒后放弃等待）
+                stop_deadline = time.monotonic() + 1.5
+            if should_stop:
+                if not alive or (stop_deadline and time.monotonic() > stop_deadline):
+                    break
+                # 等待线程退出阶段：缩短轮询间隔，不再发快照
+                time.sleep(0.05)
+                continue
             with self._lock:
                 recent = list(self._recent)
                 snap = {
@@ -271,11 +303,15 @@ class StressEngine(QObject):
                     "last_error": self.last_error,
                 }
             self.snapshot.emit(snap)
-            time.sleep(0.5)
-        # 结束：等 worker 退出（stop 已置位或超时）
+            time.sleep(poll_interval)
+        # 结束：快速等待worker退出（daemon线程，1秒总超时足够）
         self._stop.set()
+        deadline = time.monotonic() + 1.0
         for t in self._threads:
-            t.join(timeout=2.0)
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            t.join(timeout=min(remain, 0.3))
         self.running = False
         with self._lock:
             lats = list(self.latencies)
@@ -315,6 +351,8 @@ class MultiStressEngine(QObject):
 
     snapshot = Signal(dict)      # 聚合实时统计（含分目标明细 targets）
     report_ready = Signal(dict)  # 聚合汇总报告（含分目标明细 targets）
+    started = Signal()           # 所有 worker 线程已启动
+    stopping = Signal()          # 收到停止信号，等待 worker 退出
 
     def __init__(self):
         super().__init__()
@@ -325,6 +363,7 @@ class MultiStressEngine(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._emit_aggregate)
+        self._first_snap_emitted = False
 
     def start(self, configs) -> bool:
         if isinstance(configs, dict):
@@ -334,21 +373,38 @@ class MultiStressEngine(QObject):
         self._children = []
         self._snaps = {}
         self._reports = {}
+        self._first_snap_emitted = False
+        self._ready_count = 0
+        self._expected = len(configs)
+        all_ok = False
         for i, c in enumerate(configs):
             e = StressEngine()
             e._idx = i
             e.snapshot.connect(lambda d, e=e: self._on_child_snap(e, d))
             e.report_ready.connect(lambda r, e=e: self._on_child_report(e, r))
-            if not e.start(c):
-                continue
-            self._children.append(e)
-        if not self._children:
+            e.ready.connect(self._on_child_ready)
+            # 先连接信号再启动，避免 ready 信号在 connect 前发出
+            if e.start(c):
+                self._children.append(e)
+                all_ok = True
+        if not all_ok:
+            self.running = False
             return False
         self.running = True
         self._timer.start()
+        # started 信号将在所有子引擎 ready 后通过 _on_child_ready 发出
         return True
 
+    def _on_child_ready(self):
+        """每个子引擎 worker 全部启动后调用；全部就绪时 emit started。"""
+        self._ready_count += 1
+        if self._ready_count >= len(self._children):
+            self.started.emit()
+
     def stop(self):
+        if not self.running:
+            return
+        self.stopping.emit()
         for e in self._children:
             e.stop()
 
