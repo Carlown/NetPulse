@@ -744,7 +744,9 @@ class StressView(ScrollArea):
         errors = r.get("errors") or {}
         if errors:
             top = sorted(errors.items(), key=lambda kv: -kv[1])[:5]
-            breakdown = "，".join(f"{err_text(k)} ×{v}" for k, v in top)
+            sep = L("，", ", ")
+            times = L("×", "x")
+            breakdown = sep.join(f"{err_text(k)} {times}{v}" for k, v in top)
             text += "\n" + L(f"失败原因分布：{breakdown}", f"Failure reasons: {breakdown}")
         self.reportLabel.setText(text)
         log.info(f"压测完成: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}")

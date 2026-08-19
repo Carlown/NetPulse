@@ -239,7 +239,8 @@ class CollabView(ScrollArea):
     def _switch_conn_mode(self, idx):
         """切换中继/直连模式时更新 UI 显示。"""
         is_relay = (idx == 0)
-        relay_desc = "公共 MQTT 中继 (broker.hivemq.com)"
+        relay_desc = L("公共 MQTT 中继 (broker.hivemq.com)",
+                       "public MQTT relay (broker.hivemq.com)")
 
         # 主控侧
         if is_relay:
