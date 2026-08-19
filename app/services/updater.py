@@ -2,8 +2,9 @@
 import threading
 
 import requests
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QLabel
 
 APP_VERSION = "1.0.5"
 REPO = "Carlown/NetPulse"
@@ -59,10 +60,15 @@ class _Checker(QObject):
 def check_for_updates(parent=None, manual: bool = False):
     """后台检查 GitHub 最新 Release。
 
-    manual=False（启动自动检查）：仅在有新版本时弹窗；
+    manual=False（启动自动检查）：仅在有新版本且未跳过时弹窗；
     manual=True（设置页手动检查）：无论结果都给出提示。
     """
     from app.ui.i18n import L
+    from app.services.settings import settings
+
+    # 自动检查：如果用户关闭了自动检查，直接返回
+    if not manual and not settings.auto_check_updates:
+        return
 
     c = _Checker()
     _keep_alive.append(c)
@@ -81,6 +87,9 @@ def check_for_updates(parent=None, manual: bool = False):
                               parent=parent, duration=5000)
             return
         if d.get("newer"):
+            # 自动检查时，如果该版本已被用户跳过，不再弹窗
+            if not manual and settings.skip_version == d["tag"]:
+                return
             _show_update_dialog(parent, d["tag"], d["url"], L)
         elif manual:
             from qfluentwidgets import InfoBar
@@ -94,14 +103,51 @@ def check_for_updates(parent=None, manual: bool = False):
 
 
 def _show_update_dialog(parent, tag, url, L):
-    from qfluentwidgets import MessageBox
+    from qfluentwidgets import MessageBox, CheckBox
+    from app.services.settings import settings
 
     box = MessageBox(L(f"发现新版本 {tag}", f"New version {tag} available"),
-                     L(f"当前版本 v{APP_VERSION}，GitHub 已发布 {tag}。\n是否前往下载更新？",
-                       f"Current version v{APP_VERSION}; {tag} is now on GitHub.\n"
-                       f"Open the download page?"),
-                     parent)
+                     "", parent)
+
+    # 替换默认内容标签为自定义布局
+    layout = box.layout()
+    # 移除默认的 textLabel
+    if hasattr(box, 'textLabel'):
+        layout.removeWidget(box.textLabel)
+        box.textLabel.deleteLater()
+
+    # 创建自定义内容区域
+    content = QWidget(box)
+    cl = QVBoxLayout(content)
+    cl.setContentsMargins(0, 0, 0, 0)
+    cl.setSpacing(12)
+
+    msg = QLabel(L(f"当前版本 v{APP_VERSION}，GitHub 已发布 {tag}。\n是否前往下载更新？",
+                    f"Current version v{APP_VERSION}; {tag} is now on GitHub.\n"
+                    f"Open the download page?"), content)
+    msg.setWordWrap(True)
+    cl.addWidget(msg)
+
+    skipCheck = CheckBox(L("跳过此版本（不再提示本次更新）", "Skip this version (don't remind me again)"), content)
+    autoCheck = CheckBox(L("不再自动检查更新", "Don't check for updates automatically"), content)
+    cl.addWidget(skipCheck)
+    cl.addWidget(autoCheck)
+
+    # 将内容插入到 layout 中（在按钮之前）
+    layout.insertWidget(1, content)
+
     box.yesButton.setText(L("去更新", "Update"))
     box.cancelButton.setText(L("稍后再说", "Later"))
+
     if box.exec():
         QDesktopServices.openUrl(QUrl(url or LATEST_URL))
+
+    # 保存用户选择
+    if skipCheck.isChecked():
+        settings.set("skip_version", tag)
+    else:
+        # 如果用户没勾选跳过，但当前 skip_version 正是此版本，清除它（手动触发更新时）
+        if settings.skip_version == tag:
+            settings.set("skip_version", "")
+    if autoCheck.isChecked():
+        settings.set("auto_check_updates", False)

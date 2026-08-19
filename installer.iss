@@ -4,6 +4,7 @@
 #define MyAppVersion "1.0.5"
 #define MyAppPublisher "NetPulse"
 #define MyAppExeName "NetPulse.exe"
+#define MyAppDirName "NetPulse"
 
 [Setup]
 AppId={{8F4A2C1E-9B3D-4E6A-B5C7-1A2B3C4D5E6F}
@@ -40,7 +41,7 @@ chinesesimplified.ProgramComment=NetPulse 网络压力测试工具
 Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:AdditionalTasks}"
 
 [Files]
-Source: "dist\NetPulse.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\{#MyAppDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "{cm:ProgramComment}"

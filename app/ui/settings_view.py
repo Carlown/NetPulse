@@ -101,6 +101,12 @@ class SettingsView(ScrollArea):
             lambda v: settings.set("minimize_to_tray", v))
         al.addWidget(SettingRow(L("关闭时最小化到托盘", "Minimize to tray on close"),
                                 L("关闭窗口时程序将驻留系统托盘", "Keep app running in system tray when closing window"), self.traySwitch, appear))
+        self.autoUpdateSwitch = SwitchButton()
+        self.autoUpdateSwitch.setChecked(settings.auto_check_updates)
+        self.autoUpdateSwitch.checkedChanged.connect(
+            lambda v: settings.set("auto_check_updates", v))
+        al.addWidget(SettingRow(L("启动时自动检查更新", "Auto-check for updates on launch"),
+                                L("发现新版本时弹窗提示", "Show notification when new version is available"), self.autoUpdateSwitch, appear))
         self.langCombo = ComboBox()
         self.langCombo.addItems([L("跟随系统", "Auto (system)"), "简体中文", "English"])
         self.langCombo.setCurrentIndex(

@@ -18,6 +18,8 @@ class AppSettings:
         "authorized": [],             # [{host, note, ts}]
         "stress_form": {},            # 上次压测表单：{target, port, protocol, threads, rate, dur, dur_unit}
         "minimize_to_tray": True,     # 关闭时最小化到托盘
+        "auto_check_updates": True,   # 启动时自动检查更新
+        "skip_version": "",           # 跳过的版本号（不再提示该版本）
     }
 
     def __init__(self):
