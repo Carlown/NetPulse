@@ -10,9 +10,11 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             PushButton, ScrollArea, SimpleCardWidget, SpinBox,
                             StrongBodyLabel, SubtitleLabel, SwitchButton)
 
+from app.services.auth import add_authorized, is_authorized, normalize_host
 from app.services.collab import collab_client, collab_server, PORT
 from app.services.logger import log
 from app.services.stress import engine
+from app.ui.disclaimer import AuthDialog
 from app.ui.i18n import L
 from app.ui.stress_view import MiniStat
 
@@ -421,13 +423,22 @@ class CollabView(ScrollArea):
     def _push_start(self):
         stress = self.window().stress
         target_raw = stress.targetEdit.toPlainText().strip().splitlines()[0].strip()
-        from app.services.auth import normalize_host
         host = normalize_host(target_raw)
         if not host:
             InfoBar.warning(L("参数错误", "Invalid input"),
                             L("请先在压测页填写目标", "Set the target on the Stress page first"),
                             parent=self.window())
             return
+        # 授权校验：主控端广播前，目标必须先通过本机授权确认
+        if not is_authorized(host):
+            dlg = AuthDialog(host, self.window())
+            if not dlg.exec():
+                InfoBar.warning(L("已取消", "Cancelled"),
+                                L(f"目标 {host} 未授权，测试已阻止", f"Target {host} not authorized; test blocked"),
+                                parent=self.window())
+                return
+            add_authorized(host, dlg.note())
+            stress.refresh_auth_list()
         config = {
             "target": host,
             "port": stress.portSpin.value(),
@@ -508,9 +519,9 @@ class CollabView(ScrollArea):
         self._client_log(L("已退出", "Left"))
 
     def _on_remote_start(self, config):
-        """收到主控开始指令：自动填充压测页配置并启动。"""
-        self._client_log(L("收到主控指令，开始压测", "Received host command; starting"))
+        """收到主控开始指令：主控已完成目标授权，节点端直接填充配置并启动。"""
         stress = self.window().stress
+        self._client_log(L("收到主控指令，开始压测", "Received host command; starting"))
         target = config.get("url") or config.get("target", "")
         if target:
             stress.targetEdit.setPlainText(target)
