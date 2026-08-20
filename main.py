@@ -2,6 +2,13 @@
 import os
 import sys
 
+# 崩溃诊断：C 层闪退（如 paho-mqtt 线程崩溃、Qt 访问违例）时把所有线程堆栈写入 crash.log
+import faulthandler
+_crash_log_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "NetPulse", "logs")
+os.makedirs(_crash_log_dir, exist_ok=True)
+_crash_log_file = open(os.path.join(_crash_log_dir, "crash.log"), "a", encoding="utf-8")
+faulthandler.enable(_crash_log_file)
+
 # 仅导入最核心、最轻量的模块，确保启动画面能第一时间显示
 from PySide6.QtCore import QTimer, QSize
 from PySide6.QtWidgets import QApplication
@@ -59,7 +66,7 @@ def main():
     from app.services.settings import settings
     from app.ui.i18n import L, current_lang
     step(45, "加载主题...", "Loading theme...")
-    setThemeColor("#0078D4")
+    setThemeColor(settings.theme_color or "#0078D4")
     setTheme(Theme.DARK if settings.theme == "dark" else Theme.LIGHT)
     try:
         from qfluentwidgets import Language, setLanguage
@@ -96,7 +103,8 @@ def main():
     local_server = SingleInstanceServer(win)
     if not local_server.listen(SINGLE_INSTANCE_KEY):
         from app.services.logger import log
-        log.warning(f"单实例服务器启动失败: {local_server.errorString()}")
+        log.warning(L(f"单实例服务器启动失败: {local_server.errorString()}",
+                      f"Single-instance server failed to start: {local_server.errorString()}"))
     app._single_instance_server = local_server
 
     # ⑦ 命令行指定起始页
@@ -137,12 +145,12 @@ def main():
             dlg = DisclaimerDialog(win)
             if not dlg.exec():
                 from app.services.logger import log
-                log.info("用户未同意免责声明，程序退出。")
+                log.info(L("用户未同意免责声明，程序退出。", "Disclaimer not accepted; exiting."))
                 app.quit()
                 return
             settings.set("disclaimer_accepted", True)
             from app.services.logger import log
-            log.info("用户已同意免责声明。")
+            log.info(L("用户已同意免责声明。", "Disclaimer accepted."))
 
     # 让进度条在 100% 停留一会儿再关闭 splash
     QTimer.singleShot(350, complete_startup)
@@ -151,7 +159,7 @@ def main():
     from app.services.monitor import monitor
     from app.services.logger import log
     monitor.start()
-    log.info("NetPulse 启动。")
+    log.info(L("NetPulse 启动。", "NetPulse started."))
 
     # 启动 3 秒后静默检查更新
     def _auto_update_check():

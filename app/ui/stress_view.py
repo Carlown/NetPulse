@@ -147,6 +147,10 @@ class StressView(ScrollArea):
                 self.headersEdit.setPlainText(str(f["headers"]))
         except Exception:
             pass
+        # 同步headers区域可见性与当前协议一致（不调用_on_proto_changed，避免重置已恢复的端口）
+        self.headersCard.setVisible(self.protoCombo.currentText() in ("HTTP", "HTTPS"))
+        if self.protoCombo.currentText() == "ICMP":
+            self.portSpin.setEnabled(False)
 
     def _save_form(self):
         """把当前表单状态存到本地，下次启动恢复。"""
@@ -261,7 +265,7 @@ class StressView(ScrollArea):
             InfoBar.success(L("导出成功", "Exported"),
                             L(f"已保存到 {path}", f"Saved to {path}"),
                             parent=self.window(), position=InfoBarPosition.TOP, duration=3000)
-            log.info(f"配置已导出: {path}")
+            log.info(L(f"配置已导出: {path}", f"Config exported: {path}"))
         except OSError as e:
             InfoBar.error(L("导出失败", "Export Failed"),
                           L(f"无法写入文件：{e}", f"Cannot write file: {e}"),
@@ -307,7 +311,7 @@ class StressView(ScrollArea):
             InfoBar.success(L("导入成功", "Imported"),
                             L(f"已加载 {n} 个目标配置", f"Loaded {n} target(s)"),
                             parent=self.window(), position=InfoBarPosition.TOP, duration=3000)
-            log.info(f"配置已导入: {path}")
+            log.info(L(f"配置已导入: {path}", f"Config imported: {path}"))
 
     # ---------- 构建界面 ----------
 
@@ -333,8 +337,7 @@ class StressView(ScrollArea):
         self.portSpin.setValue(80)
         self.protoCombo = ComboBox(card)
         self.protoCombo.addItems(["HTTP", "HTTPS", "TCP", "UDP", "ICMP"])
-        self.protoCombo.currentTextChanged.connect(
-            lambda t: self.portSpin.setValue(443 if t == "HTTPS" else 80))
+        self.protoCombo.currentTextChanged.connect(self._on_proto_changed)
         prow.addWidget(self._wrap(BodyLabel(L("端口", "Port"), card), self.portSpin))
         prow.addWidget(self._wrap(BodyLabel(L("协议", "Protocol"), card), self.protoCombo))
         lay.addLayout(prow)
@@ -379,11 +382,17 @@ class StressView(ScrollArea):
         row2.addWidget(self._wrap(BodyLabel(L("速率上限(QPS)", "Rate Limit (QPS)"), card), self.rateSpin))
         lay.addLayout(row2)
 
-        lay.addWidget(BodyLabel(L("请求头(HTTP, 可选)", "Headers (HTTP, optional)"), card))
+        # Headers区域：仅HTTP/HTTPS时显示
+        self.headersCard = QWidget(card)
+        hdr_lay = QVBoxLayout(self.headersCard)
+        hdr_lay.setContentsMargins(0, 0, 0, 0)
+        hdr_lay.setSpacing(4)
+        hdr_lay.addWidget(BodyLabel(L("请求头(HTTP, 可选)", "Headers (HTTP, optional)"), card))
         self.headersEdit = TextEdit(card)
         self.headersEdit.setPlaceholderText('{"Authorization": "Bearer ..."}')
         self.headersEdit.setFixedHeight(56)
-        lay.addWidget(self.headersEdit)
+        hdr_lay.addWidget(self.headersEdit)
+        lay.addWidget(self.headersCard)
 
         # 授权列表
         lay.addSpacing(6)
@@ -506,6 +515,27 @@ class StressView(ScrollArea):
         self.durSpin.setValue(max(1, round(total_sec / new_factor)))
         self._dur_unit_idx = idx
 
+    def _on_proto_changed(self, proto: str):
+        """切换协议时：自动设置默认端口，显示/隐藏HTTP专属配置。"""
+        # 自动设置默认端口
+        if proto == "HTTPS":
+            self.portSpin.setValue(443)
+            self.portSpin.setEnabled(True)
+        elif proto == "HTTP":
+            self.portSpin.setValue(80)
+            self.portSpin.setEnabled(True)
+        elif proto == "ICMP":
+            # ICMP不需要端口，禁用端口输入
+            self.portSpin.setEnabled(False)
+        else:
+            # TCP/UDP：如果当前是HTTP/HTTPS默认端口则改为通用80，否则保留用户设置
+            if self.portSpin.value() in (80, 443):
+                self.portSpin.setValue(80)
+            self.portSpin.setEnabled(True)
+        # Headers仅HTTP/HTTPS可见
+        is_http = proto in ("HTTP", "HTTPS")
+        self.headersCard.setVisible(is_http)
+
     def get_duration_seconds(self) -> int:
         """按当前单位换算成秒。"""
         idx = self.durUnitCombo.currentIndex()
@@ -596,8 +626,12 @@ class StressView(ScrollArea):
 
         self._save_form()  # 持久化本次配置，重启后自动恢复
         hosts = ", ".join(c["target"] for c in configs)
-        log.info(f"开始压测({len(configs)}目标): {hosts} threads={configs[0]['threads']} "
-                 f"rate={rate} duration={configs[0]['duration']}s")
+        log.info(L(
+            f"开始压测({len(configs)}目标): {hosts} threads={configs[0]['threads']} "
+            f"rate={rate} duration={configs[0]['duration']}s",
+            f"Starting stress test ({len(configs)} target(s)): {hosts} threads={configs[0]['threads']} "
+            f"rate={rate} duration={configs[0]['duration']}s"
+        ))
 
         # 立即切换UI状态，给用户即时反馈
         self.startBtn.setEnabled(False)
@@ -661,7 +695,7 @@ class StressView(ScrollArea):
             win.show_busy(L("正在停止...", "Stopping..."),
                           L("等待 worker 线程退出", "Waiting for worker threads to exit"))
         engine.stop()
-        log.info("手动停止压测")
+        log.info(L("手动停止压测", "Stress test stopped manually"))
 
     def _on_engine_started(self):
         """所有 worker 线程已创建完成，更新状态文字。遮罩等真正开始跑数据时再隐藏。"""
@@ -749,7 +783,8 @@ class StressView(ScrollArea):
             breakdown = sep.join(f"{err_text(k)} {times}{v}" for k, v in top)
             text += "\n" + L(f"失败原因分布：{breakdown}", f"Failure reasons: {breakdown}")
         self.reportLabel.setText(text)
-        log.info(f"压测完成: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}")
+        log.info(L(f"压测完成: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}",
+                   f"Stress test finished: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}"))
 
     def fill_defaults(self, target="", port=80, protocol="HTTP"):
         """快速开始入口。"""

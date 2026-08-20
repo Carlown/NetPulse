@@ -1,13 +1,13 @@
 """设置页：主题/语言/默认参数/日志管理/检查更新/作者。"""
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QCursor, QFont
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel,
-                               QVBoxLayout, QWidget)
-from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
+                               QVBoxLayout, QWidget, QPushButton)
+from qfluentwidgets import (BodyLabel, CaptionLabel, ColorDialog, ComboBox, InfoBar,
                             PushButton, ScrollArea, SimpleCardWidget, SpinBox,
                             StrongBodyLabel, SubtitleLabel, SwitchButton,
                             setTheme, setThemeColor, Theme, IconWidget,
-                            FluentIcon, isDarkTheme)
+                            FluentIcon, isDarkTheme, qconfig)
 
 from app.services.logger import log
 from app.services.settings import settings
@@ -70,6 +70,75 @@ class ClickableCard(SimpleCardWidget):
 from PySide6.QtGui import QColor
 
 
+class ThemeColorPicker(QWidget):
+    """主题颜色选择器：预设色块 + 自定义颜色对话框。选择即生效并持久化到 settings。"""
+
+    PRESETS = ["#0078D4", "#5B5FC7", "#7B61FF", "#E3008C",
+               "#E81123", "#D83B01", "#107C10", "#00B7C3"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._swatches = []
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        for c in self.PRESETS:
+            btn = QPushButton(self)
+            btn.setFixedSize(22, 22)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("swatch_color", c)
+            btn.setToolTip(c)
+            # 用默认参数绑定当前色值，避免闭包陷阱
+            btn.clicked.connect(lambda _checked=False, col=c: self._apply(col))
+            self._swatches.append(btn)
+            lay.addWidget(btn)
+        self.customBtn = PushButton(L("自定义…", "Custom…"), self)
+        self.customBtn.clicked.connect(self._pick_custom)
+        lay.addWidget(self.customBtn)
+        self._refresh()
+        # 主题切换时刷新色块描边颜色（高亮色随主题变化）
+        qconfig.themeChanged.connect(self._refresh)
+
+    def _apply(self, color_str):
+        setThemeColor(QColor(color_str))
+        settings.set("theme_color", color_str)
+        self._refresh()
+
+    def _refresh(self, *_):
+        """刷新色块选中态：当前色加高亮描边。"""
+        cur = str(settings.theme_color).upper()
+        border_hi = "#FFFFFF" if isDarkTheme() else "#1A1A1A"
+        for btn in self._swatches:
+            c = btn.property("swatch_color")
+            if c.upper() == cur:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {c}; border-radius: 11px;"
+                    f" border: 2px solid {border_hi}; }}")
+            else:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {c}; border-radius: 11px;"
+                    f" border: 1px solid rgba(128,128,128,0.45); }}"
+                    f"QPushButton:hover {{ border: 2px solid rgba(128,128,128,0.85); }}")
+
+    def _pick_custom(self):
+        old = QColor(str(settings.theme_color))
+        dlg = ColorDialog(old, L("选择主题颜色", "Choose Theme Color"), self.window())
+        # 简化界面：隐藏"原色"对比卡（下半截），新色卡拉伸为整块实时预览
+        dlg.oldColorCard.hide()
+        dlg.newColorCard.setFixedHeight(256)
+        # pip 版 qfluentwidgets 缺失 .qm 翻译文件，对话框内部文本会回退为英文，手动跟随界面语言
+        dlg.yesButton.setText(L("确定", "OK"))
+        dlg.cancelButton.setText(L("取消", "Cancel"))
+        dlg.editLabel.setText(L("编辑颜色", "Edit Color"))
+        dlg.redLabel.setText(L("红", "Red"))
+        dlg.greenLabel.setText(L("绿", "Green"))
+        dlg.blueLabel.setText(L("蓝", "Blue"))
+        # 不做全局实时预览（setThemeColor 会全局重建样式表，拖动时太卡）：
+        # 对话框内的大色卡已能实时显示所选颜色，点"确定"才真正应用主题色
+        if dlg.exec():
+            self._apply(dlg.color.name())
+
+
 class SettingsView(ScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,6 +164,11 @@ class SettingsView(ScrollArea):
         self.darkSwitch.checkedChanged.connect(self._theme_changed)
         al.addWidget(SettingRow(L("深色模式", "Dark mode"),
                                 L("Fluent 深色主题", "Fluent dark theme"), self.darkSwitch, appear))
+        self.colorPicker = ThemeColorPicker(appear)
+        al.addWidget(SettingRow(L("主题颜色", "Theme color"),
+                                L("按钮、进度环等强调色，选择后立即生效",
+                                  "Accent color for buttons and highlights; applies instantly"),
+                                self.colorPicker, appear))
         self.traySwitch = SwitchButton()
         self.traySwitch.setChecked(settings.minimize_to_tray)
         self.traySwitch.checkedChanged.connect(
@@ -219,7 +293,6 @@ class SettingsView(ScrollArea):
 
         # 使用回调在检查完成后恢复按钮状态，同时设置10秒安全超时
         run_check(parent=self.window(), manual=True, on_finished=_done)
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(10000, _done)
 
     def _theme_changed(self, checked):

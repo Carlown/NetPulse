@@ -152,8 +152,13 @@ class StressEngine(QObject):
         payload = b"X" * max(1, c["packet_size"])
         timeout = c["timeout"] / 1000.0
 
-        # 等待所有线程就绪后统一开始（同步屏障）
-        self._start_event.wait()
+        # 等待所有线程就绪后统一开始（同步屏障）；等待期间也要响应停止信号，
+        # 防止 stop() 先于 _launch_workers 的 clear() 执行时线程永久阻塞
+        while not self._start_event.wait(timeout=0.2):
+            if self._stop.is_set():
+                if session:
+                    session.close()
+                return
         # 如果在等待期间收到了停止信号，直接退出
         if self._stop.is_set():
             if session:

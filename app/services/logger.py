@@ -35,6 +35,10 @@ class AuditLog:
     def warn(self, msg):
         self._log(logging.WARNING, msg)
 
+    def warning(self, msg):
+        """warn 的别名（兼容标准 logging 命名，避免调用方 AttributeError）。"""
+        self._log(logging.WARNING, msg)
+
     def error(self, msg):
         self._log(logging.ERROR, msg)
 

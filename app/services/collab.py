@@ -118,6 +118,9 @@ class CollabServer(QObject):
         self._relay_nodes = {}  # node_id -> {"name", "stats"}
         self._relay_mode = False
         self._relay_connected = False
+        self._gen = 0  # 邀请码代数：每次生成/关闭递增，用于让过期的MQTT后台线程失效（防快速切换模式时崩溃）
+        self._mqtt_cleanup_done = threading.Event()
+        self._mqtt_cleanup_done.set()  # 初始状态：无待清理的客户端
 
     @property
     def invite_valid(self):
@@ -139,6 +142,8 @@ class CollabServer(QObject):
         """生成邀请码。use_relay=True 使用 MQTT 中继，False 使用 TCP 直连。"""
         self.shutdown()
 
+        self._gen += 1  # 代数+1：使残留的旧MQTT后台线程（连接中/清理中）全部失效
+        gen = self._gen
         self._max_nodes = max(1, max_nodes)
         self._code = _gen_code(8 if use_relay else 6)
         self._expiry = time.time() + 300  # 5分钟有效期
@@ -146,7 +151,7 @@ class CollabServer(QObject):
 
         if use_relay:
             # MQTT 连接放到后台线程，不阻塞 UI
-            threading.Thread(target=self._start_relay_host, daemon=True).start()
+            threading.Thread(target=self._start_relay_host, args=(gen,), daemon=True).start()
         else:
             self._start_listen()
         return self._code
@@ -178,23 +183,37 @@ class CollabServer(QObject):
 
     def shutdown(self):
         """关闭所有连接和监听。"""
+        self._gen += 1  # 使残留的MQTT后台线程全部失效
         self.active = False
+        self._relay_connected = False  # 重置中继连接状态，避免残留旧状态
         # MQTT 中继先清理（需要 self._code 来发送房间关闭通知）
         # 把清理放到后台线程，避免阻塞 UI（sleep + disconnect 都是阻塞操作）
         old_client = self._mqtt_client
         old_code = self._code
         self._mqtt_client = None
         if old_client is not None:
+            self._mqtt_cleanup_done.clear()
             def _async_cleanup():
                 try:
-                    if old_code:
-                        old_client.publish(_topic_node(old_code),
-                                          json.dumps({"type": "room_closed"}), qos=1)
-                        time.sleep(0.2)
-                    old_client.loop_stop()
-                    old_client.disconnect()
-                except Exception:
-                    pass
+                    try:
+                        if old_code:
+                            old_client.publish(_topic_node(old_code),
+                                              json.dumps({"type": "room_closed"}), qos=1)
+                            time.sleep(0.2)
+                    except Exception:
+                        pass
+                    # 先 disconnect 再 loop_stop：让网络线程先收到断开通知再join，
+                    # 降低与 loop_start 并发启停导致 C 层崩溃的概率
+                    try:
+                        old_client.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        old_client.loop_stop()
+                    except Exception:
+                        pass
+                finally:
+                    self._mqtt_cleanup_done.set()
             threading.Thread(target=_async_cleanup, daemon=True).start()
         self._code = None
         # TCP 直连
@@ -222,7 +241,9 @@ class CollabServer(QObject):
     # ---------- TCP 直连内部 ----------
 
     def _start_listen(self):
+        last_err = None
         for family, bind_addr in ((socket.AF_INET6, "::"), (socket.AF_INET, "0.0.0.0")):
+            s = None
             try:
                 s = socket.socket(family, socket.SOCK_STREAM)
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -240,16 +261,21 @@ class CollabServer(QObject):
                 return
             except OSError as e:
                 last_err = e
-                try:
-                    s.close()
-                except OSError:
-                    pass
+                if s:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
         self.log_msg.emit(L(f"监听失败: {last_err}", f"Listen failed: {last_err}"))
 
     def _accept_loop(self):
         while self.active and not self._relay_mode:
+            # 取局部引用：shutdown 期间 _listen_sock 可能被置 None，避免 NoneType.accept 崩线程
+            sock = self._listen_sock
+            if sock is None:
+                break
             try:
-                conn, addr = self._listen_sock.accept()
+                conn, addr = sock.accept()
             except socket.timeout:
                 continue
             except OSError:
@@ -311,23 +337,35 @@ class CollabServer(QObject):
 
     # ---------- MQTT 中继内部 ----------
 
-    def _start_relay_host(self):
-        """通过 MQTT 中继创建房间。"""
+    def _start_relay_host(self, gen: int):
+        """通过 MQTT 中继创建房间。gen 为本次生成的代数，失效则自清理退出。"""
         try:
             import paho.mqtt.client as mqtt
         except ImportError:
             self.log_msg.emit(L("错误：缺少 paho-mqtt 库，请运行 pip install paho-mqtt",
                                 "Error: paho-mqtt missing, run: pip install paho-mqtt"))
+            self.relay_status_changed.emit(False)  # 通知UI隐藏连接遮罩
+            return
+
+        # 等待旧 MQTT 客户端清理完成，避免并发启停 paho 线程导致 C 层崩溃
+        # 加超时：即使旧清理线程异常卡住，也不能永久阻塞新连接（防止界面假死）
+        self._mqtt_cleanup_done.wait(timeout=3.0)
+
+        # 等待清理期间可能又切换了模式，再次检查代数是否有效
+        if gen != self._gen:
             return
 
         client_id = f"netpulse_host_{uuid.uuid4().hex[:12]}"
-        self._mqtt_client = mqtt.Client(
+        # 局部变量持有client：仅当代数校验通过（连接成功且未被新一次生成/关闭取代）才提交到 self._mqtt_client
+        client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_id,
             transport=MQTT_TRANSPORT
         )
 
         def on_connect(client, userdata, flags, reason_code, properties):
+            if gen != self._gen:
+                return  # 已被新的生成/关闭取代，忽略过期回调
             if reason_code == 0:
                 self._relay_connected = True
                 self.active = True
@@ -343,6 +381,8 @@ class CollabServer(QObject):
 
         def on_message(client, userdata, msg):
             """处理节点发来的消息。"""
+            if gen != self._gen:
+                return  # 过期消息，忽略
             try:
                 data = json.loads(msg.payload.decode())
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -386,6 +426,8 @@ class CollabServer(QObject):
                     self.nodes_changed.emit()
 
         def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+            if gen != self._gen:
+                return  # 过期断开事件（房间已被新的生成/关闭取代），不误清新房间状态
             if self._relay_connected:
                 self._relay_connected = False
                 if self._relay_mode:
@@ -395,17 +437,27 @@ class CollabServer(QObject):
                     self.nodes_changed.emit()
                 self.relay_status_changed.emit(False)
 
-        self._mqtt_client.on_connect = on_connect
-        self._mqtt_client.on_message = on_message
-        self._mqtt_client.on_disconnect = on_disconnect
+        client.on_connect = on_connect
+        client.on_message = on_message
+        client.on_disconnect = on_disconnect
 
         try:
-            self._mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-            self._mqtt_client.loop_start()
+            client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            # connect 阻塞期间用户可能已再次切换模式：代数失效则自清理退出，
+            # 不启动网络线程、不提交到实例（避免与 shutdown 的清理线程并发启停 paho 线程导致崩溃）
+            if gen != self._gen:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+                return
+            client.loop_start()
+            self._mqtt_client = client  # 代数有效，正式提交
             self.log_msg.emit(L("正在连接公共中继服务器...", "Connecting to public relay server..."))
         except Exception as e:
-            self.log_msg.emit(L(f"中继连接失败: {e}", f"Relay connection failed: {e}"))
-            self.relay_status_changed.emit(False)
+            if gen == self._gen:
+                self.log_msg.emit(L(f"中继连接失败: {e}", f"Relay connection failed: {e}"))
+                self.relay_status_changed.emit(False)
 
     def _relay_broadcast(self, obj):
         if self._mqtt_client and self._relay_connected:
@@ -413,25 +465,6 @@ class CollabServer(QObject):
                 self._mqtt_client.publish(_topic_node(self._code), json.dumps(obj), qos=1)
             except Exception:
                 pass
-
-    def _cleanup_relay(self):
-        """清理 MQTT 中继连接。"""
-        self._relay_connected = False
-        if self._mqtt_client:
-            try:
-                # 广播房间关闭
-                if self._code:
-                    self._mqtt_client.publish(_topic_node(self._code),
-                                              json.dumps({"type": "room_closed"}), qos=1)
-                    # 给后台线程一点时间发送消息（避免 publish 后立刻 disconnect 导致消息丢失）
-                    time.sleep(0.2)
-                self._mqtt_client.loop_stop()
-                self._mqtt_client.disconnect()
-            except Exception:
-                pass
-            self._mqtt_client = None
-        with self._lock:
-            self._relay_nodes.clear()
 
 
 # ========== 客户端（节点） ==========
@@ -456,6 +489,8 @@ class CollabClient(QObject):
         self._relay_name = None
         self._join_result = None  # (success: bool, msg: str)
         self._join_event = None
+        self._mqtt_cleanup_done = threading.Event()
+        self._mqtt_cleanup_done.set()  # 初始状态：无待清理的客户端
 
     def join(self, host: str, code: str, name: str, use_relay: bool = False):
         """加入协同测试。"""
@@ -494,6 +529,10 @@ class CollabClient(QObject):
             import paho.mqtt.client as mqtt
         except ImportError:
             return False, L("错误：缺少 paho-mqtt 库", "Error: paho-mqtt missing")
+
+        # 等待旧 MQTT 客户端清理完成，避免并发启停 paho 线程导致 C 层崩溃
+        # 加超时：即使旧清理线程异常卡住，也不能永久阻塞新连接（防止界面假死）
+        self._mqtt_cleanup_done.wait(timeout=3.0)
 
         code = code.strip().upper()
         self._relay_code = code
@@ -599,18 +638,29 @@ class CollabClient(QObject):
         node_id = self._relay_node_id
         self._mqtt_client = None
         if client:
+            self._mqtt_cleanup_done.clear()
             def _async_client_cleanup():
                 try:
-                    if code and node_id:
-                        client.publish(_topic_host(code), json.dumps({
-                            "type": "leave",
-                            "node_id": node_id
-                        }), qos=1)
-                        time.sleep(0.15)
-                    client.loop_stop()
-                    client.disconnect()
-                except Exception:
-                    pass
+                    try:
+                        if code and node_id:
+                            client.publish(_topic_host(code), json.dumps({
+                                "type": "leave",
+                                "node_id": node_id
+                            }), qos=1)
+                            time.sleep(0.15)
+                    except Exception:
+                        pass
+                    # 先 disconnect 再 loop_stop：降低 paho 网络线程并发启停崩溃风险
+                    try:
+                        client.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        client.loop_stop()
+                    except Exception:
+                        pass
+                finally:
+                    self._mqtt_cleanup_done.set()
             threading.Thread(target=_async_client_cleanup, daemon=True).start()
         self._relay_code = None
         self._relay_node_id = None

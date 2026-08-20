@@ -5,6 +5,7 @@ import uuid
 
 from app.services.logger import log
 from app.services.settings import settings
+from app.ui.i18n import L
 
 
 def normalize_host(target: str) -> str:
@@ -28,13 +29,13 @@ def add_authorized(host: str, note: str = ""):
     settings.authorized.append({"id": uuid.uuid4().hex[:8], "host": host,
                                 "note": note, "ts": time.time()})
     settings.save()
-    log.info(f"新增授权目标: {host}")
+    log.info(L(f"新增授权目标: {host}", f"Target authorized: {host}"))
 
 
 def remove_authorized(host: str):
     settings.authorized = [a for a in settings.authorized if a.get("host") != host]
     settings.save()
-    log.info(f"移除授权目标: {host}")
+    log.info(L(f"移除授权目标: {host}", f"Target authorization removed: {host}"))
 
 
 def is_private_target(host: str) -> bool:

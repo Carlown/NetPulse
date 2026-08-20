@@ -36,7 +36,6 @@ class MainWindow(FluentWindow):
         self.resize(self._default_size)
         self.setMinimumSize(self._minimum_size)
         self._first_show = True
-        self._tray_notified = False  # 标记托盘提示是否已弹过（每个运行会话只弹一次）
 
         self.dashboard = DashboardView(self)
         self.stress = StressView(self)
@@ -128,9 +127,9 @@ class MainWindow(FluentWindow):
         if settings.minimize_to_tray and self.tray_icon.isVisible():
             event.ignore()
             self.hide()
-            # 每个运行会话只弹一次提示，避免每次关闭都打扰用户
-            if not self._tray_notified:
-                self._tray_notified = True
+            # 托盘提示永久只弹一次（标记持久化，重启软件后不再提示）
+            if not settings.tray_notified:
+                settings.set("tray_notified", True)
                 self.tray_icon.showMessage(
                     "NetPulse",
                     L("程序已最小化到托盘，右键托盘图标可退出",

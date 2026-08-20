@@ -9,7 +9,7 @@ from PySide6.QtGui import (QPainter, QPixmap, QFont, QColor, QBrush,
                             QRegion)
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 SPLASH_W = 520
 SPLASH_H = 380

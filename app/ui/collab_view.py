@@ -1,4 +1,5 @@
 """协同测试页：主控邀请 / 节点加入（直连 + 中继模式）。"""
+import json
 import time
 import threading
 
@@ -13,10 +14,11 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
 from app.services.auth import add_authorized, is_authorized, normalize_host
 from app.services.collab import collab_client, collab_server, PORT
 from app.services.logger import log
+from app.services.settings import settings
 from app.services.stress import engine
 from app.ui.disclaimer import AuthDialog
 from app.ui.i18n import L
-from app.ui.stress_view import MiniStat
+from app.ui.stress_view import MiniStat, HIGH_RATE
 
 
 class CollabView(ScrollArea):
@@ -280,13 +282,32 @@ class CollabView(ScrollArea):
             self.hostLabel.show()
             self.hostEdit.show()
 
+        # 已生成过邀请码且当前是主控角色时：模式切换后旧邀请码不再适用（房间绑定生成时的模式），自动重新生成
+        # （节点角色下切换连接方式只切换UI，不触发主控房间重建）
+        if getattr(self, "_last_code", None) and self.roleCombo.currentIndex() == 0:
+            self._server_log(L(
+                f"连接模式已切换为{'中继' if is_relay else '直连'}，正在按新模式自动重新生成邀请码…",
+                f"Connection mode switched to {'relay' if is_relay else 'direct'}; regenerating invite automatically..."))
+            self._gen_invite()
+
     def _gen_invite(self):
+        # 使旧的中继等待状态与超时定时器失效（快速切换模式时防止旧定时器误关新遮罩、旧遮罩残留）
+        self._relay_busy_token = getattr(self, "_relay_busy_token", 0) + 1
+        if getattr(self, "_relay_busy", False):
+            self._relay_busy = False
+            win = self.window()
+            if hasattr(win, "hide_busy"):
+                win.hide_busy()
         use_relay = self._is_relay_mode()
         if use_relay:
             win = self.window()
             if hasattr(win, "show_busy"):
+                self._relay_busy = True  # 标记：仅隐藏自己显示的遮罩，避免误关其他遮罩（如压测启动遮罩）
+                token = self._relay_busy_token
                 win.show_busy(L("正在连接中继服务器...", "Connecting to relay server..."),
                               L("请稍候", "Please wait"))
+                # 安全超时：MQTT无响应时防止遮罩永久卡住（token失效旧的定时器）
+                QTimer.singleShot(8000, lambda: self._relay_busy_timeout(token))
         code = collab_server.generate_invite(self.maxNodesSpin.value(), use_relay=use_relay)
         self._last_code = code
         self.inviteBtn.setText(code)
@@ -313,13 +334,27 @@ class CollabView(ScrollArea):
                 f"LAN address: {self._lan_addr}  ← for LAN nodes"))
             self.addrLabel.show()  # 显示地址标签
             self.copyLanBtn.show()  # 显示局域网复制按钮
-        log.info("生成协同邀请码")
+        log.info(L("生成协同邀请码", "Collab invite generated"))
 
     def _on_relay_status(self, connected: bool):
-        """中继服务器连接状态变化时的回调。"""
-        win = self.window()
-        if hasattr(win, "hide_busy"):
-            win.hide_busy()
+        """中继服务器连接状态变化时的回调：只隐藏自己显示的连接遮罩。"""
+        if getattr(self, "_relay_busy", False):
+            self._relay_busy = False
+            win = self.window()
+            if hasattr(win, "hide_busy"):
+                win.hide_busy()
+
+    def _relay_busy_timeout(self, token=None):
+        """安全超时：MQTT长时间无响应时隐藏连接遮罩并提示。token 用于失效过期定时器。"""
+        if token is not None and token != getattr(self, "_relay_busy_token", 0):
+            return  # 过期的超时定时器（期间已重新生成邀请码/切换模式）
+        if getattr(self, "_relay_busy", False):
+            self._relay_busy = False
+            win = self.window()
+            if hasattr(win, "hide_busy"):
+                win.hide_busy()
+            self._server_log(L("连接中继服务器超时，请检查网络后重试",
+                               "Relay connection timed out; check your network and retry"))
 
     def _get_lan_ip_simple(self):
         """简单获取局域网IP，不进行公网探测。"""
@@ -386,7 +421,7 @@ class CollabView(ScrollArea):
             params = f'"{os.path.abspath(sys.argv[0])}"'
             ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
             if ret > 32:
-                log.info("请求管理员权限重启以放行防火墙。")
+                log.info(L("请求管理员权限重启以放行防火墙。", "Requesting admin restart to open firewall."))
                 QGuiApplication.quit()
             else:
                 InfoBar.warning(L("未授权", "Not elevated"),
@@ -398,6 +433,14 @@ class CollabView(ScrollArea):
     def _copy_invite(self):
         code = getattr(self, "_last_code", None)
         if not code:
+            return
+        # 邀请码已过期或房间已关闭：不允许再复制（新节点已无法用该码加入）
+        remaining = collab_server.invite_remaining_seconds()
+        if remaining <= 0:
+            InfoBar.warning(L("邀请码已失效", "Invite code expired"),
+                            L("该邀请码已过期，新节点无法使用它加入。如需邀请新节点，请重新生成邀请码。",
+                              "This invite code has expired; new nodes can no longer join with it. Generate a new invite to add nodes."),
+                            parent=self.window())
             return
         QGuiApplication.clipboard().setText(code)
         InfoBar.success(L("已复制", "Copied"),
@@ -439,6 +482,33 @@ class CollabView(ScrollArea):
                 return
             add_authorized(host, dlg.note())
             stress.refresh_auth_list()
+        # 高速率二次确认：与本地压测一致（>500 QPS时提醒），并按在线节点数计算合计压力
+        rate = stress.rateSpin.value()
+        if rate > HIGH_RATE:
+            from qfluentwidgets import MessageBox
+            n = len(collab_server.get_nodes())
+            w = MessageBox(L("高请求速率二次确认", "High Rate Confirmation"),
+                           L(f"协同测试将广播开始：每个节点速率上限 {rate} QPS，"
+                             f"当前在线 {n} 个节点（合计约 {rate * n} QPS 同时压向同一目标）。\n"
+                             f"请再次确认您拥有目标授权，且目标可承受该速率。",
+                             f"Collab test will broadcast: rate cap {rate} QPS per node, "
+                             f"{n} node(s) online (~{rate * n} QPS combined against the same target).\n"
+                             f"Confirm again that the target is authorized and can handle this rate."),
+                           self.window())
+            if not w.exec():
+                InfoBar.warning(L("已取消", "Cancelled"),
+                                L("高速率未确认，广播已取消", "High rate not confirmed; broadcast cancelled"),
+                                parent=self.window())
+                return
+        # 与本地压测一致：解析自定义请求头（非法 JSON 时阻止广播）
+        try:
+            headers_raw = stress.headersEdit.toPlainText().strip()
+            headers = json.loads(headers_raw) if headers_raw else {}
+        except json.JSONDecodeError:
+            InfoBar.warning(L("请求头格式错误", "Invalid headers"),
+                            L("请求头须为合法 JSON", "Headers must be valid JSON"),
+                            parent=self.window())
+            return
         config = {
             "target": host,
             "port": stress.portSpin.value(),
@@ -447,16 +517,21 @@ class CollabView(ScrollArea):
             "threads": stress.threadSpin.value(),
             "duration": stress.get_duration_seconds(),
             "rate": stress.rateSpin.value(),
-            "packet_size": 64,
-            "timeout": 5000,
-            "headers": {},
+            "packet_size": settings.default_packet_size,
+            "timeout": settings.default_timeout_ms,
+            "headers": headers,
         }
         if config["protocol"] in ("HTTP", "HTTPS"):
-            config["url"] = target_raw if target_raw.startswith("http") else f"{config['protocol'].lower()}://{host}"
+            # 与本地压测一致：裸主机名 + 非默认端口时，把端口拼进URL（否则节点会测默认端口）
+            url = target_raw if target_raw.startswith("http") else f"{config['protocol'].lower()}://{host}"
+            default_port = 443 if config["protocol"] == "HTTPS" else 80
+            if config["port"] != default_port and not target_raw.startswith("http"):
+                url += f":{config['port']}"
+            config["url"] = url
         collab_server.broadcast({"type": "start", "config": config})
         self._server_log(L(f"已广播开始: {config['protocol']}://{host}:{config['port']}",
                            f"Start broadcast: {config['protocol']}://{host}:{config['port']}"))
-        log.info("广播协同开始")
+        log.info(L("广播协同开始", "Collab start broadcast"))
 
     def _join(self):
         use_relay = self._is_relay_mode()
@@ -505,7 +580,7 @@ class CollabView(ScrollArea):
             self.connCombo.setEnabled(False)
             self.roleCombo.setEnabled(False)
             self._client_log(L(f"已加入，邀请码 {code}", f"Joined with code {code}"))
-            log.info(f"加入协同: code={code}")
+            log.info(L(f"加入协同: code={code}", f"Joined collab: code={code}"))
         else:
             self.joinBtn.setEnabled(True)
             InfoBar.error(L("加入失败", "Join failed"), msg, parent=self.window())
@@ -525,17 +600,35 @@ class CollabView(ScrollArea):
         target = config.get("url") or config.get("target", "")
         if target:
             stress.targetEdit.setPlainText(target)
-        port = config.get("port", 80)
-        stress.portSpin.setValue(port)
+        # 先切协议再设端口：协议切换会重置默认端口，顺序反了会覆盖主控下发的端口
         proto = config.get("protocol", "HTTP")
         idx = stress.protoCombo.findText(proto)
         if idx >= 0:
             stress.protoCombo.setCurrentIndex(idx)
+        port = config.get("port", 80)
+        stress.portSpin.setValue(port)
         threads = config.get("threads", 8)
         stress.threadSpin.setValue(threads)
         stress.threadSlider.setValue(threads)
         rate = config.get("rate", 100)
         stress.rateSpin.setValue(rate)
+        # 持续时间：把主控下发的秒数换算成最合适的单位，节点压测页显示与实际运行一致
+        dur = int(config.get("duration", 30)) or 30
+        if dur % 86400 == 0 and dur // 86400 >= 1:
+            unit_idx, unit_val = 3, dur // 86400
+        elif dur % 3600 == 0 and dur // 3600 >= 1:
+            unit_idx, unit_val = 2, dur // 3600
+        elif dur % 60 == 0 and dur // 60 >= 1:
+            unit_idx, unit_val = 1, dur // 60
+        else:
+            unit_idx, unit_val = 0, dur
+        stress.durUnitCombo.setCurrentIndex(unit_idx)
+        stress.durSpin.setRange(1, stress.DUR_MAX[unit_idx])
+        stress.durSpin.setValue(unit_val)
+        # 请求头：仅 HTTP/HTTPS 时回显到节点压测页
+        headers = config.get("headers")
+        if isinstance(headers, dict) and headers and proto in ("HTTP", "HTTPS"):
+            stress.headersEdit.setPlainText(json.dumps(headers, ensure_ascii=False, indent=2))
 
         # 立即显示等待遮罩，给用户明确反馈
         total_threads = threads
@@ -550,8 +643,15 @@ class CollabView(ScrollArea):
         QTimer.singleShot(80, self._do_remote_start)
 
     def _do_remote_start(self):
-        """延迟执行远程引擎启动。"""
+        """延迟执行远程引擎启动；若引擎忙（本地测试中）则先停止旧测试再启动。"""
         config = self._remote_start_config
+        if config is None:
+            return
+        if engine.running:
+            # 节点端正有测试在跑：先停止，稍后自动启动主控的新指令（主控指令优先）
+            engine.stop()
+            QTimer.singleShot(300, self._do_remote_start)
+            return
         self._remote_start_config = None
         engine.start([config])
         # 安全超时：5秒后强制隐藏
@@ -567,12 +667,14 @@ class CollabView(ScrollArea):
 
     def _on_remote_stop(self):
         """收到主控停止指令。"""
-        win = self.window()
-        if hasattr(win, "show_busy"):
-            win.show_busy(L("正在停止...", "Stopping..."),
-                          L("等待 worker 线程退出", "Waiting for worker threads to exit"))
-        engine.stop()
         self._client_log(L("收到主控指令，停止压测", "Received host command; stopping"))
+        # 仅在确实有测试运行时才显示遮罩（否则遮罩会因无结束事件而永久卡死）
+        if engine.running:
+            win = self.window()
+            if hasattr(win, "show_busy"):
+                win.show_busy(L("正在停止...", "Stopping..."),
+                              L("等待 worker 线程退出", "Waiting for worker threads to exit"))
+        engine.stop()
 
     def _on_remote_report(self, r):
         """远程压测结束，隐藏等待遮罩。"""

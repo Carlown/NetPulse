@@ -11,7 +11,7 @@
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QColor, QPainter, QFont
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-                               QGraphicsDropShadowEffect, QApplication)
+                               QGraphicsDropShadowEffect)
 from qfluentwidgets import IndeterminateProgressRing, isDarkTheme, qconfig
 
 from app.ui.i18n import L
@@ -132,7 +132,8 @@ class BusyOverlay(QWidget):
         self.raise_()
         super().show()
         self._position_card()
-        QApplication.processEvents()
+        # 注意：严禁在此调用 QApplication.processEvents()！它会立即执行队列中的
+        # 信号槽（如 MQTT 回调 emit 的 relay_status_changed），造成重入并导致 C++ 层崩溃。
 
     def hide(self):
         """隐藏遮罩。"""
@@ -145,7 +146,7 @@ class BusyOverlay(QWidget):
         if sub_text:
             self._sub_label.setText(sub_text)
             self._sub_label.setVisible(True)
-        QApplication.processEvents()
+        # 禁止 processEvents（原因见 show() 注释），setText 后 Qt 会自动重绘。
 
     def _position_card(self):
         """将卡片居中放置。"""

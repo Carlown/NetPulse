@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget, QProgressBar)
 from qfluentwidgets import (BodyLabel, CaptionLabel, PrimaryPushButton,
                             ScrollArea, SimpleCardWidget,
-                            StrongBodyLabel, TitleLabel, isDarkTheme)
+                            StrongBodyLabel, TitleLabel, isDarkTheme, qconfig)
 
 from app.services.monitor import monitor
 from app.ui.charts import ACCENT, GREEN, PURPLE, HoverChart
@@ -68,6 +68,12 @@ class StatCard(SimpleCardWidget):
         lay.addWidget(self.unit)
         lay.addStretch(1)
         self.setMinimumHeight(120)
+        # 主题切换时刷新次要文字颜色（初始化时写死会残留旧主题的颜色）
+        qconfig.themeChanged.connect(self._refresh_theme_colors)
+
+    def _refresh_theme_colors(self, *_):
+        self.unit.setStyleSheet(
+            f"font-size:12px; color:{_subtle_text_color()}; background:transparent;")
 
     def set_value(self, text):
         self.value.setText(text)
@@ -111,6 +117,13 @@ class PercentCard(SimpleCardWidget):
 
         lay.addStretch(1)
         self.setMinimumHeight(150)
+        # 主题切换时刷新次要文字颜色（初始化时写死会残留旧主题的颜色）
+        qconfig.themeChanged.connect(self._refresh_theme_colors)
+
+    def _refresh_theme_colors(self, *_):
+        self.detailLabel.setStyleSheet(
+            f"font-size:12px; color:{_subtle_text_color()}; background:transparent;")
+        self._apply_bar_style(self._cur_color)
 
     def _apply_bar_style(self, color: str):
         bg = _bar_bg_color()

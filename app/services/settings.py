@@ -7,6 +7,7 @@ import time
 class AppSettings:
     DEFAULTS = {
         "theme": "light",             # dark / light
+        "theme_color": "#0078D4",     # 主题强调色（按钮、进度条等）
         "language": "auto",            # auto（跟随系统）/ zh-CN / en-US
         "default_threads": 8,
         "default_timeout_ms": 5000,
@@ -18,6 +19,7 @@ class AppSettings:
         "authorized": [],             # [{host, note, ts}]
         "stress_form": {},            # 上次压测表单：{target, port, protocol, threads, rate, dur, dur_unit}
         "minimize_to_tray": True,     # 关闭时最小化到托盘
+        "tray_notified": False,       # 托盘最小化提示是否已弹过（永久只提示一次）
         "auto_check_updates": True,   # 启动时自动检查更新
         "skip_version": "",           # 跳过的版本号（不再提示该版本）
     }
