@@ -82,7 +82,13 @@ class CollabView(ScrollArea):
         # 邀请码（点击即可复制）—— 初始隐藏，生成邀请码后再显示
         self.inviteBtn = PushButton("-", self.hostCard)
         self.inviteBtn.clicked.connect(self._copy_invite)
-        self.inviteBtn.setStyleSheet("font-size:22px; font-weight:700; padding:6px 24px;")
+        # 用 setCustomStyleSheet 叠加字号字重，不用 setStyleSheet 覆盖：
+        # 后者会清掉按钮的主题文字色规则，导致深色模式下文字变黑
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(
+            self.inviteBtn,
+            "PushButton{font-size:22px; font-weight:700; padding:6px 24px;}",
+            "PushButton{font-size:22px; font-weight:700; padding:6px 24px;}")
         self.inviteBtn.hide()  # 初始隐藏
         hl.addWidget(self.inviteBtn)
 

@@ -1,33 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
-
-block_cipher = None
+# NetPulse 打包配置（onedir 模式，供 Inno Setup 打安装包）：
+# 排除环境中无关的可编辑安装包（phantom_backend 等），
+# 避免把 torch/scipy 等巨型依赖拖进 exe。
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('app.ico', '.'),
-        ('app_logo.png', '.'),
-    ],
-    hiddenimports=[
-        'paho.mqtt.client',
-        'paho.mqtt',
-    ],
+    datas=[('app.ico', '.')],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 环境里残留的大型库，与应用无关，强制排除
-        'torch', 'torchaudio', 'torchvision',
-        'scipy', 'matplotlib', 'numpy.testing',
-        'rich', 'phantom_backend',
-        'tkinter', 'unittest', 'pydoc',
+        'torch', 'torchvision', 'torchaudio', 'tensorflow', 'numpy.testing',
+        'scipy', 'pandas', 'matplotlib', 'phantom_backend', 'IPython',
+        'jupyter', 'notebook', 'cv2', 'PIL.ImageQt',
     ],
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -39,7 +32,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -54,7 +47,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='NetPulse',
 )

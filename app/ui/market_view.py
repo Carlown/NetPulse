@@ -465,6 +465,9 @@ class LocalPluginRow(QWidget):
         self._del_btn.clicked.disconnect()
         self._del_btn.clicked.connect(
             lambda _=False, pid=rec.pid, nm=name: self._remove(pid, nm))
+        # 更新图标（加载完成后 display_name/icon 才可用，需同步刷新，
+        # 否则首次 refresh 时插件尚未加载，图标会一直停留在 pid 首字母）
+        self._refresh_icon(rec)
         # 更新描述
         self._update_desc(rec)
         # 更新状态
@@ -473,6 +476,13 @@ class LocalPluginRow(QWidget):
         self._switch.blockSignals(True)
         self._switch.setChecked(rec.state == "loaded")
         self._switch.blockSignals(False)
+
+    def _refresh_icon(self, rec):
+        """重设图标：先清掉兜底文字/样式，再按优先级设置真实图标或首字。"""
+        self._icon_label.setText("")
+        self._icon_label.setStyleSheet("")
+        self._icon_label.setPixmap(QPixmap())
+        self._set_local_icon(self._icon_label, rec)
 
     def _update_desc(self, rec):
         """更新作者/描述行。"""
@@ -487,6 +497,7 @@ class LocalPluginRow(QWidget):
 
     def _update_state(self, rec):
         """更新状态文本和错误行。"""
+        from qfluentwidgets import setCustomStyleSheet
         state_map = {
             "loaded": L("运行中", "Running"),
             "disabled": L("已禁用", "Disabled"),
@@ -496,10 +507,16 @@ class LocalPluginRow(QWidget):
         state_text = state_map.get(rec.state, rec.state)
         self._state_label.setText(L(f"状态：{state_text}", f"State: {state_text}"))
         if rec.state == "error":
-            self._state_label.setStyleSheet("color:#e81123;")
+            # 用 setCustomStyleSheet 而非 setStyleSheet：后者会清空 CaptionLabel
+            # 自带的主题色规则，导致深色模式下文字回退成黑色
+            setCustomStyleSheet(
+                self._state_label,
+                "FluentLabelBase{color:#e81123;}",
+                "FluentLabelBase{color:#e81123;}")
             self._state_label.setToolTip(rec.error or "")
         else:
-            self._state_label.setStyleSheet("")
+            # 传空串：清除 error 时加的红色规则，恢复 CaptionLabel 默认主题色
+            setCustomStyleSheet(self._state_label, "", "")
             self._state_label.setToolTip("")
         # 错误详情行
         if self._error_label is not None:
@@ -507,7 +524,10 @@ class LocalPluginRow(QWidget):
             self._error_label = None
         if rec.state == "error" and rec.error:
             self._error_label = CaptionLabel(str(rec.error).splitlines()[0], self)
-            self._error_label.setStyleSheet("color:#e81123;")
+            setCustomStyleSheet(
+                self._error_label,
+                "FluentLabelBase{color:#e81123;}",
+                "FluentLabelBase{color:#e81123;}")
             self._error_label.setWordWrap(True)
             # 插入到 state_label 后面
             lay = self.layout()
@@ -1092,9 +1112,19 @@ class MarketView(ScrollArea):
 
         self.pivot = Pivot(self.view)
         self.stack = QStackedWidget(self.view)
+        # 关键：内部 QStackedWidget 必须显式透明，否则主题切换时
+        # 子类 QWidget 会回退到调色板绘制，叠加 Mica 出现底色反转
+        # （浅色模式黑底、深色模式白底）。
+        self.stack.setStyleSheet("QStackedWidget{background: transparent; border: none;}")
+        self.stack.setAttribute(Qt.WA_StyledBackground, True)
 
         self.localPage = LocalPluginsPage(self.view)
         self.marketPage = PluginMarketPage(self.view)
+        # 两个页面容器也显式透明，避免同样的回退底色问题
+        self.localPage.setStyleSheet("#localPluginsPage{background: transparent;}")
+        self.marketPage.setStyleSheet("#pluginMarketPage{background: transparent;}")
+        self.localPage.setAttribute(Qt.WA_StyledBackground, True)
+        self.marketPage.setAttribute(Qt.WA_StyledBackground, True)
 
         self.stack.addWidget(self.localPage)
         self.stack.addWidget(self.marketPage)
