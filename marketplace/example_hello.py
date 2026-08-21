@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""NetPulse 市场插件：入门示例（你好插件）。
+"""NetPulse 示例插件：演示插件 API 基本用法。
 
-演示插件 API 最小用法：
+插件开发说明：
 - 继承 NetPulsePlugin（宿主已自动注入，无需 import）
 - name / description 支持 (中文, 英文) 元组，自动跟随界面语言
 - create_widget(parent) 返回的控件会作为独立页面加入主窗口导航
 - on_load(ctx) / on_unload() 管理生命周期
 - ctx.get(key) / ctx.set(key, value) 读写插件私有配置（自动持久化）
+- 插件是第三方代码，请仅安装可信来源的插件
 """
 
 
