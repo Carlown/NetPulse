@@ -284,13 +284,12 @@ class PublishDialog(MessageBoxBase):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(L("发布插件到市场", "Publish to Marketplace"))
-        self.widget.setMinimumSize(600, 520)
+        self.widget.setMinimumWidth(600)
         self._icon_data_uri = ""
 
-        vl = QVBoxLayout(self.widget)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(8)
-        vl.addWidget(StrongBodyLabel(L("发布插件到市场", "Publish to Marketplace")))
+        self.titleLabel = StrongBodyLabel(L("发布插件到市场", "Publish to Marketplace"))
+        self.viewLayout.addWidget(self.titleLabel)
+
         steps = BodyLabel(L(
             "上架流程（免费，无需服务器）：\n"
             "1. 把插件 .py 文件托管到任意可公开直链下载的地址（推荐你自己的 GitHub 仓库）；\n"
@@ -302,7 +301,7 @@ class PublishDialog(MessageBoxBase):
             "3. Open the submission page, add the entry to the plugins array and open a PR. "
             "It goes live once merged."))
         steps.setWordWrap(True)
-        vl.addWidget(steps)
+        self.viewLayout.addWidget(steps)
 
         row = QHBoxLayout()
         row.addWidget(BodyLabel(L("本地插件", "Local plugin")))
@@ -311,7 +310,7 @@ class PublishDialog(MessageBoxBase):
             if rec.plugin is not None:
                 self.combo.addItem(f"{rec.pid} (v{getattr(rec.plugin, 'version', '?')})", rec.pid)
         row.addWidget(self.combo, 1)
-        vl.addLayout(row)
+        self.viewLayout.addLayout(row)
 
         # 图标选择
         irow = QHBoxLayout()
@@ -323,13 +322,13 @@ class PublishDialog(MessageBoxBase):
         pickBtn.clicked.connect(self._pick_icon)
         irow.addWidget(pickBtn)
         irow.addStretch(1)
-        vl.addLayout(irow)
+        self.viewLayout.addLayout(irow)
 
         from qfluentwidgets import TextEdit
         self.jsonBox = TextEdit()
         self.jsonBox.setReadOnly(True)
         self.jsonBox.setFixedHeight(190)
-        vl.addWidget(self.jsonBox)
+        self.viewLayout.addWidget(self.jsonBox)
 
         btns = QHBoxLayout()
         genBtn = PushButton(L("生成条目", "Generate"))
@@ -342,14 +341,14 @@ class PublishDialog(MessageBoxBase):
         openBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(INDEX_EDIT_URL)))
         btns.addWidget(openBtn)
         btns.addStretch(1)
-        vl.addLayout(btns)
+        self.viewLayout.addLayout(btns)
 
         tip = CaptionLabel(L(
             "图标会以 base64 内嵌进索引（上限 64KB），无需额外托管；sha256 用于完整性校验。",
             "The icon is base64-embedded in the index (max 64KB), no extra hosting needed; "
             "sha256 is for integrity."))
         tip.setWordWrap(True)
-        vl.addWidget(tip)
+        self.viewLayout.addWidget(tip)
 
         self.yesButton.setText(L("关闭", "Close"))
         self.cancelButton.hide()
