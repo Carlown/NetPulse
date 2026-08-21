@@ -99,6 +99,7 @@ class NetPulsePlugin:
     author = ""
     description = ""              # 简介，可为 (中文, 英文)
     icon = ""                     # 导航图标：图片路径（相对插件文件）或 FluentIcon 名（如"SPEED_HIGH"）
+    category = ""                 # 市场分类：tool/protocol/ui/other；缺省自动识别
     api_version = PLUGIN_API_VERSION
 
     def on_load(self, ctx: "PluginContext"):

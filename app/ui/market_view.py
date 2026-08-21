@@ -7,6 +7,7 @@
 - 图标支持 base64 data URI 或 http(s) 直链
 """
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -18,12 +19,13 @@ from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout,
                                QLabel, QStackedWidget, QVBoxLayout, QWidget)
-from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox,
-                            IndeterminateProgressRing, InfoBar, MessageBox,
-                            MessageBoxBase, Pivot, PrimaryPushButton,
-                            PushButton, ScrollArea, SearchLineEdit,
-                            SimpleCardWidget, StrongBodyLabel, SubtitleLabel,
-                            SwitchButton, TextEdit)
+from qfluentwidgets import (Action, BodyLabel, CaptionLabel, ComboBox,
+                            FluentIcon as FIF, IndeterminateProgressRing,
+                            InfoBar, MessageBox, MessageBoxBase, Pivot,
+                            PrimaryPushButton, PushButton, RoundMenu,
+                            ScrollArea, SearchLineEdit, SimpleCardWidget,
+                            StrongBodyLabel, SubtitleLabel, SwitchButton,
+                            TextEdit, ToolButton)
 
 from app.services.market import (INDEX_EDIT_URL, MarketClient,
                                  GITHUB_OAUTH_CLIENT_ID, device_flow_start,
@@ -34,6 +36,29 @@ from app.ui.i18n import L
 
 _ICON_SIZE = 40
 _MAX_ICON_BYTES = 64 * 1024
+
+# 插件分类：JSON 里的 category 值 -> (中文, English)
+_PLUGIN_CATEGORIES = (
+    ("tool", ("工具", "Tools")),
+    ("protocol", ("协议", "Protocols")),
+    ("ui", ("界面", "UI & Pages")),
+    ("other", ("其他", "Misc")),
+)
+
+
+def _category_label(key: str):
+    """分类 key 转双语标签；未知 key 归入“其他”。"""
+    for k, label in _PLUGIN_CATEGORIES:
+        if k == key:
+            return label
+    return _PLUGIN_CATEGORIES[-1][1]
+
+
+def _entry_category(entry: dict) -> str:
+    """读取条目分类，缺省/非法值归入 other。"""
+    v = str(entry.get("category", "") or "").strip().lower()
+    return v if any(k == v for k, _ in _PLUGIN_CATEGORIES) else "other"
+
 
 # 无图标插件的默认底色池（按插件 ID 稳定选取，同插件颜色不变）
 _FALLBACK_COLORS = ("#E81123", "#F7630C", "#CA500F", "#FFB900",
@@ -724,15 +749,45 @@ class PluginMarketPage(QWidget):
         root.setContentsMargins(0, 8, 0, 0)
         root.setSpacing(10)
 
-        # 搜索 + 工具栏
+        # 搜索 + 筛选 + 排序 + 工具栏
         topbar = QHBoxLayout()
-        topbar.setSpacing(10)
+        topbar.setSpacing(8)
         self.searchEdit = SearchLineEdit(self)
         self.searchEdit.setPlaceholderText(L("搜索插件名称、作者、描述…",
                                              "Search by name, author, description…"))
         self.searchEdit.setClearButtonEnabled(True)
         self.searchEdit.textChanged.connect(self._apply_filter)
         topbar.addWidget(self.searchEdit, 1)
+
+        # 筛选按钮：按类型筛选
+        self._filter_cat = "all"
+        self.filterBtn = ToolButton(FIF.FILTER, self)
+        self.filterBtn.setToolTip(L("筛选类型", "Filter by type"))
+        self.filterMenu = RoundMenu(parent=self)
+        self._filter_actions = []
+        filter_items = [("all", ("全部", "All"))] + list(_PLUGIN_CATEGORIES)
+        for key, label in filter_items:
+            act = Action(_i18n_text(label), checkable=True, parent=self)
+            act.setChecked(key == "all")
+            act.triggered.connect(lambda _c, k=key: self._set_filter_cat(k))
+            self.filterMenu.addAction(act)
+            self._filter_actions.append((act, key))
+        self.filterBtn.setMenu(self.filterMenu)
+        topbar.addWidget(self.filterBtn)
+
+        # 排序：长条下拉选排序方式 + 按钮切正序/倒序
+        self._sort_desc = True
+        self.sortCombo = ComboBox(self)
+        self.sortCombo.addItems([L("按时间", "Time"), L("按名称", "Name"),
+                                 L("按作者", "Author"), L("按版本", "Version")])
+        self.sortCombo.setCurrentIndex(0)
+        self.sortCombo.currentIndexChanged.connect(lambda _i: self._resort())
+        self.sortDirBtn = ToolButton(FIF.DOWN, self)
+        self.sortDirBtn.setToolTip(L("倒序（点击切换）", "Descending (click to toggle)"))
+        self.sortDirBtn.clicked.connect(self._toggle_sort_dir)
+        topbar.addWidget(self.sortCombo)
+        topbar.addWidget(self.sortDirBtn)
+
         self.pubBtn = PushButton(L("发布插件…", "Publish a Plugin…"), self)
         self.pubBtn.clicked.connect(self._publish)
         topbar.addWidget(self.pubBtn)
@@ -794,30 +849,74 @@ class PluginMarketPage(QWidget):
         else:
             self.statusLabel.setText(L(
                 f"暂无可安装的插件{src}", f"No installable plugins{src}"))
+        self._resort()
         self._apply_filter(self.searchEdit.text())
+
+    def _set_filter_cat(self, key: str):
+        """切换类型筛选，并同步菜单勾选状态。"""
+        self._filter_cat = key
+        for act, k in self._filter_actions:
+            act.setChecked(k == key)
+        self._apply_filter(self.searchEdit.text())
+
+    def _toggle_sort_dir(self):
+        """正序 ↔ 倒序切换。"""
+        self._sort_desc = not self._sort_desc
+        if self._sort_desc:
+            self.sortDirBtn.setIcon(FIF.DOWN)
+            self.sortDirBtn.setToolTip(L("倒序（点击切换）", "Descending (click to toggle)"))
+        else:
+            self.sortDirBtn.setIcon(FIF.UP)
+            self.sortDirBtn.setToolTip(L("正序（点击切换）", "Ascending (click to toggle)"))
+        self._resort()
+
+    def _sort_key(self, card):
+        """当前排序方式对应的比较键。"""
+        from app.services.updater import _ver_tuple
+        e = card.entry
+        idx = self.sortCombo.currentIndex()
+        if idx == 0:      # 时间（缺日期视为最旧）
+            return str(e.get("date", "") or "0000-00-00")
+        if idx == 1:      # 名称（取当前语言文本）
+            return _i18n_text(e.get("name", "")).lower()
+        if idx == 2:      # 作者
+            return str(e.get("author", "") or "").lower()
+        return _ver_tuple(str(e.get("version", "0") or "0"))  # 版本
+
+    def _resort(self):
+        """按当前排序方式重排卡片（保持末尾 stretch）。"""
+        if not self._all_cards:
+            return
+        cards = sorted(self._all_cards, key=self._sort_key,
+                       reverse=self._sort_desc)
+        self._all_cards = cards
+        for card in cards:
+            self.listLay.removeWidget(card)
+        for card in cards:
+            self.listLay.insertWidget(self.listLay.count() - 1, card)
 
     def _apply_filter(self, kw: str):
         kw = (kw or "").strip().lower()
         visible = 0
         for card in getattr(self, "_all_cards", []):
-            if not kw:
-                card.show()
-                visible += 1
-                continue
             e = card.entry
-            name = e.get("name", "")
-            if isinstance(name, (tuple, list)):
-                name = " ".join(str(x) for x in name)
-            desc = e.get("description", "")
-            if isinstance(desc, (tuple, list)):
-                desc = " ".join(str(x) for x in desc)
-            hay = " ".join(str(x) for x in (e.get("id", ""), name,
-                                             e.get("author", ""), desc)).lower()
-            match = kw in hay
-            card.setVisible(match)
-            if match:
+            ok = True
+            if self._filter_cat != "all":
+                ok = (_entry_category(e) == self._filter_cat)
+            if ok and kw:
+                name = e.get("name", "")
+                if isinstance(name, (tuple, list)):
+                    name = " ".join(str(x) for x in name)
+                desc = e.get("description", "")
+                if isinstance(desc, (tuple, list)):
+                    desc = " ".join(str(x) for x in desc)
+                hay = " ".join(str(x) for x in (e.get("id", ""), name,
+                                                 e.get("author", ""), desc)).lower()
+                ok = kw in hay
+            card.setVisible(ok)
+            if ok:
                 visible += 1
-        if self._all_cards and kw:
+        if self._all_cards and (kw or self._filter_cat != "all"):
             self.statusLabel.setText(
                 L(f"匹配 {visible} / {len(self._all_cards)} 个插件",
                   f"{visible} / {len(self._all_cards)} plugin(s) match"))
@@ -1195,9 +1294,19 @@ class PublishDialog(MessageBoxBase):
                 self.combo.addItem(
                     f"{rec.pid} (v{getattr(rec.plugin, 'version', '?')})")
                 self._combo_pids.append(rec.pid)
-        self.combo.currentIndexChanged.connect(lambda _i: self._generate())
+        self.combo.currentIndexChanged.connect(self._on_plugin_changed)
         row.addWidget(self.combo, 1)
         self.viewLayout.addLayout(row)
+
+        # 分类选择（自动识别，可手动改）
+        crow = QHBoxLayout()
+        crow.addWidget(BodyLabel(L("插件分类", "Category"), self.widget))
+        self.catCombo = ComboBox(self.widget)
+        self.catCombo.addItems(
+            _i18n_text(label) for _, label in _PLUGIN_CATEGORIES)
+        self.catCombo.currentIndexChanged.connect(lambda _i: self._generate())
+        crow.addWidget(self.catCombo, 1)
+        self.viewLayout.addLayout(crow)
 
         # 图标选择
         irow = QHBoxLayout()
@@ -1307,7 +1416,7 @@ class PublishDialog(MessageBoxBase):
 
         self.yesButton.setText(L("关闭", "Close"))
         self.cancelButton.hide()
-        QTimer.singleShot(0, self._generate)
+        QTimer.singleShot(0, lambda: self._on_plugin_changed(self.combo.currentIndex()))
 
     def _pick_icon(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1336,6 +1445,35 @@ class PublishDialog(MessageBoxBase):
                                                  Qt.SmoothTransformation))
         self._generate()
 
+    @staticmethod
+    def _auto_category(rec, p) -> str:
+        """根据插件实际能力自动识别分类：
+        显式 category 属性 > 注册了协议 > 自定义页面 > 工具。"""
+        cat = str(getattr(p, "category", "") or "").strip().lower()
+        if any(k == cat for k, _ in _PLUGIN_CATEGORIES):
+            return cat
+        from app.services.plugins import NetPulsePlugin
+        if any(v.get("pid") == rec.pid
+               for v in plugin_manager._protocols.values()):
+            return "protocol"
+        if type(p).create_widget is not NetPulsePlugin.create_widget:
+            return "ui"
+        return "tool"
+
+    def _on_plugin_changed(self, _i):
+        """切换所选插件时：自动识别分类（不覆盖用户后续手改），再生成 JSON。"""
+        idx = self.combo.currentIndex()
+        pid = self._combo_pids[idx] if 0 <= idx < len(self._combo_pids) else None
+        rec = plugin_manager.record(pid) if pid else None
+        if rec is not None and rec.plugin is not None:
+            auto = self._auto_category(rec, rec.plugin)
+            ci = [k for k, _ in _PLUGIN_CATEGORIES].index(auto)
+            if self.catCombo.currentIndex() != ci:
+                self.catCombo.blockSignals(True)
+                self.catCombo.setCurrentIndex(ci)
+                self.catCombo.blockSignals(False)
+        self._generate()
+
     def _generate(self):
         idx = self.combo.currentIndex()
         pid = self._combo_pids[idx] if 0 <= idx < len(self._combo_pids) else None
@@ -1360,6 +1498,9 @@ class PublishDialog(MessageBoxBase):
             "version": str(getattr(p, "version", "1.0")),
             "author": str(getattr(p, "author", "") or ""),
             "description": _tup(getattr(p, "description", "")),
+            "category": [k for k, _ in _PLUGIN_CATEGORIES][
+                max(0, self.catCombo.currentIndex())],
+            "date": datetime.date.today().isoformat(),
             "file": f"{rec.pid}.py",
             "sha256": digest,
             "min_app": "1.0.7",
