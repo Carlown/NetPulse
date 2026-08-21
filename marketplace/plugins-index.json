@@ -3,23 +3,6 @@
   "updated": "2026-08-21",
   "plugins": [
     {
-      "id": "example_hello",
-      "name": [
-        "你好插件",
-        "Hello Plugin"
-      ],
-      "version": "1.0",
-      "author": "NetPulse",
-      "description": [
-        "示例插件：演示 NetPulse 插件 API，可在 设置 → 插件 中禁用或删除",
-        "Example plugin demonstrating the plugin API; disable or remove it in Settings → Plugins"
-      ],
-      "file": "example_hello.py",
-      "sha256": "ddc89cff703853437476e5b370453243b57eb22fe95c821139408b165069fb62",
-      "min_app": "1.0.7",
-      "homepage": "https://github.com/Carlown/NetPulse"
-    },
-    {
       "id": "random_target",
       "name": [
         "随机目标生成器",
