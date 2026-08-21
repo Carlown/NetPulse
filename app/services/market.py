@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 
 import requests
 from PySide6.QtCore import QObject, Signal
@@ -21,21 +22,41 @@ from app.services.plugins import plugins_dir
 from app.services.updater import _ver_tuple
 
 INDEX_SOURCES = [
-    "https://raw.githubusercontent.com/Carlown/NetPulse/master/marketplace/plugins-index.json",
+    # GitHub Contents API：内容实时（无 CDN 缓存延迟），匿名限额 60 次/小时，够日常刷新
+    ("https://api.github.com/repos/Carlown/NetPulse/contents/marketplace/plugins-index.json?ref=master", "api"),
+    # raw 直链兜底（可能有几分钟 CDN 延迟，但无限额）
+    ("https://raw.githubusercontent.com/Carlown/NetPulse/master/marketplace/plugins-index.json", "raw"),
 ]
 # 索引在线编辑入口（发布插件用）
 INDEX_EDIT_URL = "https://github.com/Carlown/NetPulse/edit/master/marketplace/plugins-index.json"
 
 _TIMEOUT = 10
+_CACHE_WINDOW = 300  # 秒：raw 源加 ?t= 参数穿透 CDN 缓存，5 分钟一档
+
+
+def _fetch_index_raw(url: str, kind: str):
+    """拉取并解析索引，返回 dict；失败抛异常。kind: api | raw。"""
+    if kind == "api":
+        r = requests.get(url, timeout=_TIMEOUT,
+                         headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        import base64
+        payload = r.json()
+        text = base64.b64decode(payload["content"]).decode("utf-8")
+    else:
+        bust = f"{url}{'&' if '?' in url else '?'}t={int(time.time() // _CACHE_WINDOW)}"
+        r = requests.get(bust, timeout=_TIMEOUT)
+        r.raise_for_status()
+        text = r.text
+    data = json.loads(text)
+    if not isinstance(data, dict) or "plugins" not in data:
+        raise ValueError("bad index format")
+    return data
 
 
 def _cache_file() -> str:
     base = os.path.dirname(plugins_dir())
     return os.path.join(base, "market_cache.json")
-
-
-def _base_url(index_url: str) -> str:
-    return index_url.rsplit("/", 1)[0] + "/"
 
 
 class MarketClient(QObject):
@@ -52,11 +73,9 @@ class MarketClient(QObject):
 
     def _fetch_work(self):
         last_err = ""
-        for url in INDEX_SOURCES:
+        for url, kind in INDEX_SOURCES:
             try:
-                r = requests.get(url, timeout=_TIMEOUT)
-                r.raise_for_status()
-                data = r.json()
+                data = _fetch_index_raw(url, kind)
                 entries = self._parse_index(data)
                 if entries is None:
                     last_err = "bad index format"
@@ -105,12 +124,13 @@ class MarketClient(QObject):
 
     def _install_work(self, entry: dict):
         pid = entry.get("id", "?")
-        # 解析插件文件地址：相对路径基于索引所在目录；也可填完整 URL
+        # 解析插件文件地址：相对路径基于仓库 marketplace 目录（raw 直链）；也可填完整 URL
         f = entry.get("file", "")
         if f.startswith("http://") or f.startswith("https://"):
             url = f
         else:
-            url = _base_url(INDEX_SOURCES[0]) + f
+            url = ("https://raw.githubusercontent.com/Carlown/NetPulse"
+                   f"/master/marketplace/{f}")
         try:
             r = requests.get(url, timeout=_TIMEOUT)
             r.raise_for_status()
