@@ -15,8 +15,10 @@
         "Generate random private IPs and ports for quick test forms"
       ],
       "file": "random_target.py",
-      "sha256": "87eab33c53b6e23c413ea46dd32f0f92757d5885ca305f714a8a984c9ed92ed1",
+      "sha256": "87eab33c53b6e23c413ea46dd32f0f92757d5885ca305f714b8a984c9ed92ed1",
       "min_app": "1.0.7",
+      "category": "tool",
+      "date": "2026-08-19",
       "homepage": "https://github.com/Carlown/NetPulse"
     },
     {
@@ -34,6 +36,8 @@
       "file": "example_dns.py",
       "sha256": "ab705427e8c8e94d5b5ad1800b2fc1455c3773ad3870ccc624896271a5e4bd83",
       "min_app": "1.0.7",
+      "category": "protocol",
+      "date": "2026-08-20",
       "homepage": "https://github.com/Carlown/NetPulse"
     },
     {
@@ -51,6 +55,8 @@
       "file": "example_hello.py",
       "sha256": "ddc89cff703853437476e5b370453243b57eb22fe95c821139408b165069fb62",
       "min_app": "1.0.7",
+      "category": "ui",
+      "date": "2026-08-21",
       "homepage": "https://github.com/Carlown/NetPulse"
     }
   ]
