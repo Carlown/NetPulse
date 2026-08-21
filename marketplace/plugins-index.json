@@ -37,6 +37,23 @@
       "min_app": "1.0.7",
       "homepage": "https://github.com/Carlown/NetPulse",
       "icon": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPojvkGAANTAd5l+BR8AAAAAElFTkSuQmCC"
+    },
+    {
+      "id": "random_target",
+      "name": [
+        "随机目标生成器",
+        "Random Target Generator"
+      ],
+      "version": "1.0",
+      "author": "NetPulse",
+      "description": [
+        "一键生成随机内网 IP 和端口，用于快速填充测试表单",
+        "Generate random private IPs and ports for quick test forms"
+      ],
+      "file": "random_target.py",
+      "sha256": "87eab33c53b6e23c413ea46dd32f0f92757d5885ca305f714a8a984c9ed92ed1",
+      "min_app": "1.0.7",
+      "homepage": "https://github.com/Carlown/NetPulse"
     }
   ]
 }
