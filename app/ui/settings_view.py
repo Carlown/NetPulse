@@ -4,7 +4,7 @@ from PySide6.QtGui import QDesktopServices, QCursor, QFont
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget, QPushButton)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ColorDialog, ComboBox, InfoBar,
-                            PrimaryPushButton, PushButton, ScrollArea, SimpleCardWidget,
+                            PushButton, ScrollArea, SimpleCardWidget,
                             SpinBox, StrongBodyLabel, SubtitleLabel, SwitchButton,
                             setTheme, setThemeColor, Theme, IconWidget,
                             FluentIcon, isDarkTheme, qconfig)
@@ -325,15 +325,12 @@ class SettingsView(ScrollArea):
         self.pluginListLayout.setSpacing(2)
         pl.addLayout(self.pluginListLayout)
         brow = QHBoxLayout()
-        self.marketBtn = PrimaryPushButton(L("插件市场…", "Plugin Marketplace…"), plugcard)
-        self.marketBtn.clicked.connect(self._open_market)
         self.importPluginBtn = PushButton(L("导入插件…", "Import Plugin…"), plugcard)
         self.importPluginBtn.clicked.connect(self._import_plugin)
         self.openPluginDirBtn = PushButton(L("打开插件目录", "Open Plugin Folder"), plugcard)
         self.openPluginDirBtn.clicked.connect(self._open_plugin_dir)
         self.rescanPluginBtn = PushButton(L("重新扫描", "Rescan"), plugcard)
         self.rescanPluginBtn.clicked.connect(self._rescan_plugins)
-        brow.addWidget(self.marketBtn)
         brow.addWidget(self.importPluginBtn)
         brow.addWidget(self.openPluginDirBtn)
         brow.addWidget(self.rescanPluginBtn)
@@ -451,11 +448,6 @@ class SettingsView(ScrollArea):
         os.startfile(os.path.dirname(log.file_path))
 
     # ---------- 插件 ----------
-    def _open_market(self):
-        """打开插件市场（GitHub 仓库索引，零服务器方案）。"""
-        from app.ui.market_dialog import MarketDialog
-        MarketDialog(self.window()).exec()
-
     def _refresh_plugins(self):
         """重建插件列表（changed 信号经 singleShot 延迟触发，避免删除信号发送者）。"""
         from app.services.plugins import plugin_manager

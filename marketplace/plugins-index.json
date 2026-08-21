@@ -4,7 +4,10 @@
   "plugins": [
     {
       "id": "example_dns",
-      "name": ["DNS 协议示例", "DNS Protocol Example"],
+      "name": [
+        "DNS 协议示例",
+        "DNS Protocol Example"
+      ],
       "version": "1.0",
       "author": "NetPulse",
       "description": [
@@ -14,11 +17,15 @@
       "file": "example_dns.py",
       "sha256": "ab705427e8c8e94d5b5ad1800b2fc1455c3773ad3870ccc624896271a5e4bd83",
       "min_app": "1.0.7",
-      "homepage": "https://github.com/Carlown/NetPulse"
+      "homepage": "https://github.com/Carlown/NetPulse",
+      "icon": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgqLgCAAHIAU3MyLxFAAAAAElFTkSuQmCC"
     },
     {
       "id": "example_hello",
-      "name": ["你好插件", "Hello Plugin"],
+      "name": [
+        "你好插件",
+        "Hello Plugin"
+      ],
       "version": "1.0",
       "author": "NetPulse",
       "description": [
@@ -28,7 +35,8 @@
       "file": "example_hello.py",
       "sha256": "e5acd2c5a2dcf2df07c7726c98a56f5cbeca2fd2baa787522774383fcdb50c9f",
       "min_app": "1.0.7",
-      "homepage": "https://github.com/Carlown/NetPulse"
+      "homepage": "https://github.com/Carlown/NetPulse",
+      "icon": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPojvkGAANTAd5l+BR8AAAAAElFTkSuQmCC"
     }
   ]
 }

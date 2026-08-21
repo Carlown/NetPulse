@@ -13,12 +13,14 @@ from app.ui.busy_overlay import BusyOverlay
 from app.ui.collab_view import CollabView
 from app.ui.dashboard import DashboardView
 from app.ui.i18n import L
+from app.ui.market_view import MarketView
 from app.ui.monitor_view import MonitorView
 from app.ui.settings_view import SettingsView
 from app.ui.stress_view import StressView
 
 MON_ICON = getattr(FIF, "DIAGNOSTICS", getattr(FIF, "HEART", FIF.DEVELOPER_TOOLS))
 PLUGIN_ICON = getattr(FIF, "APPLICATION", FIF.DEVELOPER_TOOLS)
+MARKET_ICON = getattr(FIF, "CLOUD", getattr(FIF, "IOT", PLUGIN_ICON))
 
 
 def _get_icon_path():
@@ -42,6 +44,7 @@ class MainWindow(FluentWindow):
         self.stress = StressView(self)
         self.collab = CollabView(self)
         self.monitor = MonitorView(self)
+        self.market = MarketView(self)
         self.settingsView = SettingsView(self)
 
         self.init_navigation()
@@ -58,6 +61,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.stress, FIF.SPEED_HIGH, L("压力测试", "Stress Test"))
         self.addSubInterface(self.collab, FIF.CONNECT, L("协同测试", "Collaborative"))
         self.addSubInterface(self.monitor, MON_ICON, L("监控面板", "Monitor"))
+        self.addSubInterface(self.market, MARKET_ICON, L("插件市场", "Plugins"))
         self.addSubInterface(self.settingsView, FIF.SETTING, L("设置", "Settings"),
                              NavigationItemPosition.BOTTOM)
 
