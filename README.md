@@ -47,7 +47,7 @@ NetPulse v1.1.0 ships with a full plugin platform — extend the app with your o
 - **Rich Plugin API**: register custom protocols, exporters, target providers and metrics subscriptions; respond to test lifecycle events
 - **Sandboxed loading**: plugin crashes never take down the host app
 
-Check the built-in `example_hello.py` / `example_dns.py` plugins in the plugin folder for API usage examples.
+Check the built-in `example_hello.py` / `example_dns.py` plugins in the plugin folder for API usage examples. **Want to write your own?** See the [**Plugin Development Guide**](PLUGINS.md) — a minimal plugin is about 10 lines of Python.
 
 ### Install (End Users)
 
@@ -127,7 +127,7 @@ NetPulse v1.1.0 内置完整插件平台，可以自由扩展功能：
 - **丰富的插件 API**：注册自定义协议、导出器、目标源和指标订阅；响应测试生命周期事件
 - **沙箱加载**：插件崩溃不会拖垮主程序
 
-插件目录内置 `example_hello.py` / `example_dns.py` 示例插件，可参考其 API 用法。
+插件目录内置 `example_hello.py` / `example_dns.py` 示例插件，可参考其 API 用法。**想自己写一个？** 看 [**插件开发指南**](PLUGINS.md) —— 最小插件只要 10 行 Python。
 
 ### 安装（普通用户）
 
