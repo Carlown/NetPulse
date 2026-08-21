@@ -5,8 +5,8 @@ import json
 import os
 import shutil
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QDesktopServices, QUrl
+from PySide6.QtCore import QUrl, Qt, QTimer
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout,
                                QScrollArea, QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, IndeterminateProgressRing,

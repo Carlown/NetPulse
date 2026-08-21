@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""插件市场：以 GitHub/Gitee 仓库为后端（零服务器方案）。
+"""插件市场：以 GitHub 仓库为后端（零服务器方案）。
 
 - 索引文件 marketplace/plugins-index.json 托管在项目仓库
 - 插件作者把插件文件放到任意可公开下载的地址（通常是自己仓库），
   再向项目仓库提交 PR 在索引中添加条目，合并后即上架
-- 客户端从双源拉取索引（GitHub raw 优先，Gitee 兜底，国内可达），
-  安装时下载插件文件并校验 sha256，复用本地插件导入管线
+- 客户端拉取索引，安装时下载插件文件并校验 sha256，复用本地插件导入管线
 - 索引拉取结果缓存到本地，离线时显示上次的内容
 """
 import hashlib
@@ -23,7 +22,6 @@ from app.services.updater import _ver_tuple
 
 INDEX_SOURCES = [
     "https://raw.githubusercontent.com/Carlown/NetPulse/master/marketplace/plugins-index.json",
-    "https://gitee.com/carlown/netpulse/raw/master/marketplace/plugins-index.json",
 ]
 # 索引在线编辑入口（发布插件用）
 INDEX_EDIT_URL = "https://github.com/Carlown/NetPulse/edit/master/marketplace/plugins-index.json"
@@ -118,18 +116,8 @@ class MarketClient(QObject):
             r.raise_for_status()
             content = r.content
         except Exception as e:
-            # GitHub 失败换 Gitee 源再试（相对路径场景）
-            if not f.startswith("http"):
-                try:
-                    r2 = requests.get(_base_url(INDEX_SOURCES[1]) + f, timeout=_TIMEOUT)
-                    r2.raise_for_status()
-                    content = r2.content
-                except Exception:
-                    self.download_failed.emit(pid, str(e))
-                    return
-            else:
-                self.download_failed.emit(pid, str(e))
-                return
+            self.download_failed.emit(pid, str(e))
+            return
         # sha256 完整性校验（索引提供时强制校验，不匹配拒绝安装）
         expect = (entry.get("sha256") or "").strip().lower()
         if expect:
