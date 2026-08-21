@@ -24,6 +24,7 @@ class AppSettings:
         "skip_version": "",           # 跳过的版本号（不再提示该版本）
         "plugins_disabled": [],       # 已禁用插件 ID 列表
         "plugin_data": {},            # 插件私有配置 {pid: {key: value}}
+        "github_token": "",           # GitHub Personal Access Token（一键发布插件用）
     }
 
     def __init__(self):

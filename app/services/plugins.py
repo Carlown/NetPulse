@@ -31,6 +31,53 @@ def plugins_dir() -> str:
     return base
 
 
+def plugin_icon_path(pid: str) -> str:
+    """市场安装时保存的插件图标路径（{pid}.icon.png），不存在返回空字符串。"""
+    p = os.path.join(plugins_dir(), f"{pid}.icon.png")
+    return p if os.path.isfile(p) else ""
+
+
+def resolve_plugin_icon(plugin, pid: str, rec_path: str = "", icon_val: str = ""):
+    """解析插件导航图标，返回 QIcon 或 FluentIcon；失败返回 None。
+
+    优先级：
+    1. 市场图标 {plugins_dir}/{pid}.icon.png
+    2. 插件类 icon 属性（图片路径 / FluentIcon 名）
+    3. None（调用方使用默认图标）
+
+    plugin 为 None 时，可通过 icon_val 直接传入图标字符串（用于禁用/卸载后）。
+    """
+    from PySide6.QtGui import QIcon
+    # 1. 市场安装时保存的图标
+    mp = plugin_icon_path(pid)
+    if mp:
+        return QIcon(mp)
+    # 2. 插件自定义
+    if plugin is not None:
+        ic = getattr(plugin, "icon", "") or ""
+    else:
+        ic = icon_val or ""
+    # 已经是 QIcon / FluentIcon 枚举对象，直接返回
+    if not isinstance(ic, str):
+        return ic if ic else None
+    ic = ic.strip()
+    if not ic:
+        return None
+    # FluentIcon 名（如 "SPEED_HIGH"）
+    if not os.path.isabs(ic) and not os.path.exists(ic) and "/" not in ic and "\\" not in ic:
+        try:
+            from qfluentwidgets import FluentIcon as FIF
+            return getattr(FIF, ic.upper(), None)
+        except Exception:
+            return None
+    # 图片路径（相对插件文件目录）
+    if not os.path.isabs(ic) and rec_path:
+        ic = os.path.join(os.path.dirname(rec_path), ic)
+    if os.path.isfile(ic):
+        return QIcon(ic)
+    return None
+
+
 def _i18n_text(v):
     """元组 (中文, 英本) 按当前界面语言取值；普通字符串原样返回。"""
     from app.ui.i18n import current_lang
@@ -51,6 +98,7 @@ class NetPulsePlugin:
     version = "1.0"
     author = ""
     description = ""              # 简介，可为 (中文, 英文)
+    icon = ""                     # 导航图标：图片路径（相对插件文件）或 FluentIcon 名（如"SPEED_HIGH"）
     api_version = PLUGIN_API_VERSION
 
     def on_load(self, ctx: "PluginContext"):
@@ -150,6 +198,20 @@ class _PluginRecord:
         self.path = path              # main.py 完整路径
         self.plugin = None            # NetPulsePlugin 实例（未加载为 None）
         self.error = None             # 加载错误信息
+        self._meta = {}               # 加载成功后缓存的元数据（卸载后仍可显示）
+
+    def _cache_meta(self):
+        """从插件实例缓存元数据，以便卸载/禁用后仍能显示名称、图标等。"""
+        p = self.plugin
+        if p is None:
+            return
+        self._meta = {
+            "name": getattr(p, "name", ""),
+            "version": getattr(p, "version", ""),
+            "author": getattr(p, "author", ""),
+            "description": getattr(p, "description", ""),
+            "icon": getattr(p, "icon", ""),
+        }
 
     @property
     def pid(self) -> str:
@@ -172,6 +234,37 @@ class _PluginRecord:
         if self.error:
             return "error"
         return "loaded" if self.plugin else "unloaded"
+
+    # 以下属性优先用已加载实例，否则用缓存（禁用/卸载后仍可显示）
+    @property
+    def display_name(self):
+        if self.plugin is not None:
+            return self.plugin.name
+        return self._meta.get("name", self.pid)
+
+    @property
+    def display_version(self):
+        if self.plugin is not None:
+            return self.plugin.version
+        return self._meta.get("version", "")
+
+    @property
+    def display_author(self):
+        if self.plugin is not None:
+            return self.plugin.author
+        return self._meta.get("author", "")
+
+    @property
+    def display_description(self):
+        if self.plugin is not None:
+            return self.plugin.description
+        return self._meta.get("description", "")
+
+    @property
+    def display_icon(self):
+        if self.plugin is not None:
+            return self.plugin.icon
+        return self._meta.get("icon", "")
 
 
 class PluginManager(QObject):
@@ -349,6 +442,7 @@ class PluginManager(QObject):
             plugin.id = pid
             plugin.on_load(PluginContext(pid))
             rec.plugin = plugin
+            rec._cache_meta()
             from app.ui.i18n import L
             log.info(L(f"插件已加载：{pid}", f"Plugin loaded: {pid}"))
             self.loaded.emit(plugin)
@@ -384,6 +478,11 @@ class PluginManager(QObject):
             pass
         rec.plugin = None
         self._cleanup_registrations(pid)
+        # 从 sys.modules 清除旧模块，避免更新时加载到缓存的旧代码
+        mod_prefix = f"netpulse_plugin_{pid}"
+        for key in list(sys.modules.keys()):
+            if key == mod_prefix or key.startswith(mod_prefix + "."):
+                del sys.modules[key]
         from app.ui.i18n import L
         log.info(L(f"插件已卸载：{pid}", f"Plugin unloaded: {pid}"))
         self.unloaded.emit(pid)
@@ -417,7 +516,10 @@ class PluginManager(QObject):
         return self.load(rec) if rec else False
 
     def import_from(self, src: str):
-        """把 .py 文件或文件夹复制进插件目录并加载。返回 (成功?, 消息)。"""
+        """把 .py 文件或文件夹复制进插件目录并加载。返回 (成功?, 消息)。
+
+        安装/更新即视为用户要启用，会自动从禁用列表移除。
+        """
         from app.ui.i18n import L
         if not os.path.exists(src):
             return False, L("源路径不存在", "Source path not found")
@@ -426,6 +528,19 @@ class PluginManager(QObject):
         if not base or base in (".", ".."):
             return False, L("无效的插件路径", "Invalid plugin path")
         dst = os.path.join(root, base)
+
+        # 先计算目标 pid，如果已加载则先卸载（Windows 下文件会被占用，必须先释放）
+        target_pid = os.path.splitext(base)[0] if base.endswith(".py") else base
+        existing = self.record(target_pid)
+        if existing is not None and existing.plugin is not None:
+            self.unload(target_pid)
+
+        # 安装/更新即视为启用，从禁用列表移除
+        dis = set(settings.plugins_disabled or [])
+        if target_pid in dis:
+            dis.discard(target_pid)
+            settings.set("plugins_disabled", sorted(dis))
+
         entry = None
         try:
             if os.path.isdir(src):
@@ -438,13 +553,18 @@ class PluginManager(QObject):
             else:
                 if not src.endswith(".py"):
                     return False, L("仅支持 .py 插件文件", "Only .py plugin files supported")
-                shutil.copy2(src, dst)
+                # 源和目标相同则跳过复制（文件已就位）
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    shutil.copy2(src, dst)
                 entry = dst
         except Exception as e:
             return False, L(f"复制失败：{e}", f"Copy failed: {e}")
+
         self.discover()
-        rec = self.record(_PluginRecord(entry).pid)
-        ok = self.load(rec) if rec else False
+        rec = self.record(target_pid)
+        if rec is None:
+            return False, L("插件记录未找到", "Plugin record not found")
+        ok = self.load(rec)
         if ok:
             return True, L(f"插件已导入：{base}", f"Plugin imported: {base}")
         msg = L("插件导入但加载失败，请检查插件代码", "Imported but failed to load; check plugin code")
@@ -468,6 +588,10 @@ class PluginManager(QObject):
                 shutil.rmtree(target)
             else:
                 os.remove(target)
+            # 同时清理市场图标缓存
+            icon_f = os.path.join(root, f"{pid}.icon.png")
+            if os.path.isfile(icon_f):
+                os.remove(icon_f)
         except Exception as e:
             log.error(L(f"插件删除失败：{pid} — {e}", f"Plugin remove failed: {pid} — {e}"))
             return False

@@ -20,7 +20,6 @@ from app.ui.stress_view import StressView
 
 MON_ICON = getattr(FIF, "DIAGNOSTICS", getattr(FIF, "HEART", FIF.DEVELOPER_TOOLS))
 PLUGIN_ICON = getattr(FIF, "APPLICATION", FIF.DEVELOPER_TOOLS)
-MARKET_ICON = getattr(FIF, "CLOUD", getattr(FIF, "IOT", PLUGIN_ICON))
 
 
 def _get_icon_path():
@@ -61,7 +60,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.stress, FIF.SPEED_HIGH, L("压力测试", "Stress Test"))
         self.addSubInterface(self.collab, FIF.CONNECT, L("协同测试", "Collaborative"))
         self.addSubInterface(self.monitor, MON_ICON, L("监控面板", "Monitor"))
-        self.addSubInterface(self.market, MARKET_ICON, L("插件市场", "Plugins"))
+        self.addSubInterface(self.market, PLUGIN_ICON, L("插件", "Plugins"))
         self.addSubInterface(self.settingsView, FIF.SETTING, L("设置", "Settings"),
                              NavigationItemPosition.BOTTOM)
 
@@ -101,8 +100,13 @@ class MainWindow(FluentWindow):
         pid = plugin.id
         widget.setObjectName(f"plugin_{pid}")
         self._plugin_pages[pid] = widget
+        # 解析插件图标：市场图标 > 插件自定义 > 默认
+        from app.services.plugins import plugin_manager, resolve_plugin_icon
+        rec = plugin_manager.record(pid)
+        rec_path = rec.path if rec else ""
+        icon = resolve_plugin_icon(plugin, pid, rec_path) or PLUGIN_ICON
         try:
-            self.addSubInterface(widget, PLUGIN_ICON, plugin.page_title())
+            self.addSubInterface(widget, icon, plugin.page_title())
         except Exception as e:
             from app.services.logger import log
             log.error(L(f"插件页面注册失败：{pid} — {e}",

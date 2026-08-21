@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QLabel, QWidget
 
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.1.0"
 REPO = "Carlown/NetPulse"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 LATEST_URL = f"https://github.com/{REPO}/releases/latest"

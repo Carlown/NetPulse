@@ -1,40 +1,250 @@
 # -*- coding: utf-8 -*-
-"""插件市场页面：主窗口独立导航页。
+"""插件页面：Pivot 双页 — 本地插件管理 + 插件市场。
 
-- 列表展示市场插件（图标 + 名称/版本/作者/描述 + 安装/更新按钮）
-- 图标支持两种形式（索引 entry["icon"]）：
-  1) data URI（data:image/png;base64,...）——发布向导自动生成，无需额外托管
-  2) http(s) 直链——后台线程下载后显示
-- 发布向导：选择本地插件 + 选择本地 PNG/JPG 图标（自动 base64 内嵌），
-  生成索引条目 JSON，引导到 GitHub 提交 PR 上架
+- 本地插件：启停/重载/删除/导入，从设置页迁移而来
+- 插件市场：浏览社区插件、安装、搜索
+- 发布向导：选择本地插件 + 图标，支持一键通过 GitHub API 提交 PR 上架
+- 图标支持 base64 data URI 或 http(s) 直链
 """
 import base64
 import hashlib
 import json
 import os
 import shutil
-import tempfile
 import threading
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+import requests
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog,
-                               QHBoxLayout, QLabel, QVBoxLayout, QWidget)
-from qfluentwidgets import (BodyLabel, CaptionLabel, IndeterminateProgressRing,
-                            MessageBoxBase, PrimaryPushButton, PushButton,
-                            ScrollArea, SimpleCardWidget, StrongBodyLabel,
-                            SubtitleLabel)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout,
+                               QLabel, QStackedWidget, QVBoxLayout, QWidget)
+from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox,
+                            IndeterminateProgressRing, InfoBar, MessageBox,
+                            MessageBoxBase, Pivot, PrimaryPushButton,
+                            PushButton, ScrollArea, SearchLineEdit,
+                            SimpleCardWidget, StrongBodyLabel, SubtitleLabel,
+                            SwitchButton, TextEdit)
 
-from app.services.market import INDEX_EDIT_URL, MarketClient
-from app.services.plugins import plugin_manager
+from app.services.market import (INDEX_EDIT_URL, MarketClient,
+                                 GITHUB_OAUTH_CLIENT_ID, device_flow_start,
+                                 device_flow_poll)
+from app.services.plugins import _i18n_text, plugin_manager, plugins_dir
+from app.services.settings import settings
 from app.ui.i18n import L
 
 _ICON_SIZE = 40
-_MAX_ICON_BYTES = 64 * 1024  # data URI 图标上限 64KB
+_MAX_ICON_BYTES = 64 * 1024
+
+# 无图标插件的默认底色池（按插件 ID 稳定选取，同插件颜色不变）
+_FALLBACK_COLORS = ("#E81123", "#F7630C", "#CA500F", "#FFB900",
+                    "#107C10", "#038387", "#0078D4", "#8764B8", "#C239B3")
+
+
+def _fallback_color(entry: dict) -> str:
+    """根据插件 ID/名称稳定取一个底色（同一插件每次颜色相同）。"""
+    key = str(entry.get("id") or entry.get("name") or "?")
+    n = 0
+    for ch in key:
+        n = (n * 31 + ord(ch)) & 0xFFFFFFFF
+    return _FALLBACK_COLORS[n % len(_FALLBACK_COLORS)]
+
+# GitHub 一键发布相关常量
+_REPO_OWNER = "Carlown"
+_REPO_NAME = "NetPulse"
+_REPO_BRANCH = "master"
+_MARKET_DIR = "marketplace"
+_GH_API = "https://api.github.com"
+
+
+def gh_headers(token):
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "NetPulse-Plugin-Publisher",
+    }
+
+
+def gh_get_user(token):
+    r = requests.get(f"{_GH_API}/user", headers=gh_headers(token), timeout=15)
+    r.raise_for_status()
+    return r.json()["login"]
+
+
+def gh_can_push(token):
+    """当前 token 用户是否对上游仓库有 push 权限。"""
+    r = requests.get(f"{_GH_API}/repos/{_REPO_OWNER}/{_REPO_NAME}",
+                     headers=gh_headers(token), timeout=15)
+    if r.status_code != 200:
+        return False
+    return bool((r.json().get("permissions") or {}).get("push"))
+
+
+def gh_get_file(repo_api, path, branch, headers):
+    """读取文件，返回 (text_content, sha)；不存在返回 (None, None)。"""
+    r = requests.get(f"{repo_api}/contents/{path}", headers=headers,
+                     params={"ref": branch}, timeout=10)
+    if r.status_code == 404:
+        return None, None
+    r.raise_for_status()
+    info = r.json()
+    return base64.b64decode(info["content"]).decode("utf-8"), info["sha"]
+
+
+def gh_get_json_file(repo_api, path, branch, headers):
+    """读取 JSON 文件，返回 (data, sha)；不存在返回 (None, None)。"""
+    text, sha = gh_get_file(repo_api, path, branch, headers)
+    if text is None:
+        return None, None
+    return json.loads(text), sha
+
+
+def gh_put_file(repo_api, path, content_b64, message, branch, headers, sha=None):
+    payload = {"message": message, "content": content_b64, "branch": branch}
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(f"{repo_api}/contents/{path}", headers=headers,
+                     json=payload, timeout=20)
+    if r.status_code not in (200, 201):
+        r.raise_for_status()
+    return r.json()
+
+
+def gh_delete_file(repo_api, path, message, branch, headers, sha):
+    r = requests.delete(f"{repo_api}/contents/{path}", headers=headers,
+                        params={"message": message, "branch": branch, "sha": sha},
+                        timeout=15)
+    if r.status_code not in (200, 202):
+        r.raise_for_status()
+    return r.json()
+
+
+class NeedsReauth(Exception):
+    """token 缺少必要 scope，需要重新授权。"""
+
+
+def gh_check_scopes(token):
+    """返回当前 token 的 scope 集合。"""
+    r = requests.get(f"{_GH_API}/user", headers=gh_headers(token), timeout=15)
+    r.raise_for_status()
+    scopes = r.headers.get("X-OAuth-Scopes", "") or ""
+    return {s.strip() for s in scopes.split(",") if s.strip()}
+
+
+# 内嵌的自动合并工作流，所有者发布时自动推送到仓库
+_AUTO_MERGE_WORKFLOW = r"""name: Auto-merge Marketplace PRs
+
+on:
+  pull_request_target:
+    paths:
+      - 'marketplace/**'
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.state == 'open' && !github.event.pull_request.draft
+    steps:
+      - name: Validate and auto-merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.issue.number;
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner, repo, pull_number: pr, per_page: 100,
+            });
+            const illegal = files.filter(f => !f.filename.startsWith('marketplace/'));
+            if (illegal.length > 0) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pr,
+                body: 'Auto-merge rejected: non-marketplace files changed.\n\n' +
+                      illegal.map(f => '- ' + f.filename).join('\n'),
+              });
+              await github.rest.pulls.update({ owner, repo, pull_number: pr, state: 'closed' });
+              core.setFailed('Non-marketplace files detected.');
+              return;
+            }
+            const idxFile = files.find(f => f.filename === 'marketplace/plugins-index.json');
+            if (idxFile) {
+              try {
+                const { data: content } = await github.rest.repos.getContent({
+                  owner, repo, path: 'marketplace/plugins-index.json',
+                  ref: context.payload.pull_request.head.sha,
+                });
+                const json = JSON.parse(Buffer.from(content.content, 'base64').toString('utf-8'));
+                if (!Array.isArray(json.plugins)) throw new Error('plugins is not an array');
+                const ids = new Set();
+                for (const p of json.plugins) {
+                  if (!p.id || !p.name || !p.version)
+                    throw new Error('plugin missing required fields');
+                  if (ids.has(p.id)) throw new Error('duplicate id: ' + p.id);
+                  ids.add(p.id);
+                }
+              } catch (e) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pr,
+                  body: 'Index validation failed: ' + e.message,
+                });
+                core.setFailed('Validation failed: ' + e.message);
+                return;
+              }
+            }
+            try {
+              await github.rest.pulls.merge({
+                owner, repo, pull_number: pr, merge_method: 'squash',
+                commit_title: `[Auto-merge] ${context.payload.pull_request.title}`,
+              });
+            } catch (e) {
+              try {
+                await github.rest.pulls.enableAutoMerge({
+                  owner, repo, pull_number: pr, merge_method: 'squash',
+                });
+              } catch (e2) {
+                core.setFailed('Merge failed: ' + e.message);
+              }
+            }
+"""
+
+
+def gh_file_sha(repo_api, path, branch, headers):
+    """只检查文件是否存在并返回 sha；不存在返回 None。不解析内容。"""
+    r = requests.get(f"{repo_api}/contents/{path}", headers=headers,
+                     params={"ref": branch}, timeout=10)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.json().get("sha")
+
+
+def gh_ensure_workflow(token):
+    """确保仓库里有自动合并工作流；缺少则推送。
+
+    如果 token 没有 workflow scope，抛 NeedsReauth。
+    """
+    headers = gh_headers(token)
+    upstream = f"{_GH_API}/repos/{_REPO_OWNER}/{_REPO_NAME}"
+    wf_path = ".github/workflows/auto-merge-marketplace.yml"
+    wf_b64 = base64.b64encode(_AUTO_MERGE_WORKFLOW.encode("utf-8")).decode()
+
+    sha = gh_file_sha(upstream, wf_path, _REPO_BRANCH, headers)
+    if sha:
+        return  # 已存在
+    try:
+        gh_put_file(upstream, wf_path, wf_b64,
+                    "Add auto-merge workflow for marketplace",
+                    _REPO_BRANCH, headers)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code in (403, 404):
+            raise NeedsReauth("workflow scope required")
+        raise
 
 
 def decode_data_uri_icon(v: str):
-    """解析 data:image/...;base64,xxx → bytes；失败返回 None。"""
     if not isinstance(v, str) or not v.startswith("data:"):
         return None
     try:
@@ -45,14 +255,11 @@ def decode_data_uri_icon(v: str):
 
 
 def load_icon_async(icon_field, callback):
-    """异步取图标字节：data URI 立即回调；http(s) 后台下载后回调；无图标不回调。"""
     data = decode_data_uri_icon(icon_field)
     if data is not None:
         callback(data)
         return
     if isinstance(icon_field, str) and icon_field.startswith(("http://", "https://")):
-        import requests
-
         def _work():
             try:
                 r = requests.get(icon_field, timeout=8)
@@ -65,7 +272,7 @@ def load_icon_async(icon_field, callback):
 
 
 class PluginIconLabel(QLabel):
-    """插件图标：无图标时显示首字母底色块。"""
+    """插件图标：无图标时显示插件名首字 + 专属底色块。"""
 
     def __init__(self, entry: dict, parent=None):
         super().__init__(parent)
@@ -74,28 +281,27 @@ class PluginIconLabel(QLabel):
         name = entry.get("name", "?")
         if isinstance(name, (tuple, list)) and len(name) == 2:
             name = name[0] if L("中", "en") == "中" else name[1]
-        self._fallback_text(name)
+        self._fallback_text(name, _fallback_color(entry))
 
         def _set(data):
             pm = QPixmap()
             if pm.loadFromData(data):
+                self.setStyleSheet("")
                 self.setPixmap(pm.scaled(_ICON_SIZE, _ICON_SIZE,
                                          Qt.KeepAspectRatio,
                                          Qt.SmoothTransformation))
         load_icon_async(entry.get("icon", ""), _set)
 
-    def _fallback_text(self, name: str):
+    def _fallback_text(self, name: str, color: str):
         ch = (str(name)[:1] or "?").upper()
         self.setText(ch)
         self.setStyleSheet(
-            "color:white; font-size:18px; font-weight:600;"
-            "background:#0078D4; border-radius:6px;")
+            f"color:white; font-size:18px; font-weight:600;"
+            f"background:{color}; border-radius:6px;")
 
 
 class MarketCard(SimpleCardWidget):
-    """单个市场插件卡片。"""
-
-    def __init__(self, entry: dict, view: "MarketView", parent=None):
+    def __init__(self, entry: dict, view: "PluginMarketPage", parent=None):
         super().__init__(parent)
         self.entry = entry
         self.view = view
@@ -116,10 +322,22 @@ class MarketCard(SimpleCardWidget):
         col.addWidget(dlab)
         lay.addLayout(col, 1)
 
-        self.btn = PrimaryPushButton(self)
+        # 按钮列：安装/更新 + 下架
+        btn_wrap = QWidget(self)
+        btn_col = QVBoxLayout(btn_wrap)
+        btn_col.setContentsMargins(0, 0, 0, 0)
+        btn_col.setSpacing(4)
+        self.btn = PrimaryPushButton(btn_wrap)
         self.btn.setFixedWidth(96)
         self.btn.clicked.connect(self._install)
-        lay.addWidget(self.btn, 0, Qt.AlignVCenter)
+        btn_col.addWidget(self.btn)
+        self.unpubBtn = PushButton(L("下架", "Unpublish"), btn_wrap)
+        self.unpubBtn.setFixedWidth(96)
+        self.unpubBtn.setStyleSheet("PushButton{color:#e81123;}")
+        self.unpubBtn.clicked.connect(self._unpublish)
+        btn_col.addWidget(self.unpubBtn)
+        btn_col.addStretch(1)
+        lay.addWidget(btn_wrap, 0, Qt.AlignVCenter)
         self.refresh_state()
 
     @staticmethod
@@ -130,7 +348,10 @@ class MarketCard(SimpleCardWidget):
 
     def refresh_state(self):
         st = MarketClient.installed_state(self.entry)
-        if st == "same":
+        if st == "disabled":
+            self.btn.setText(L("启用", "Enable"))
+            self.btn.setEnabled(True)
+        elif st == "same":
             self.btn.setText(L("已安装", "Installed"))
             self.btn.setEnabled(False)
         elif st == "update":
@@ -141,13 +362,719 @@ class MarketCard(SimpleCardWidget):
             self.btn.setEnabled(True)
 
     def _install(self):
+        # 已安装但被禁用：直接启用，无需重新下载
+        st = MarketClient.installed_state(self.entry)
+        if st == "disabled":
+            pid = self.entry.get("id", "")
+            plugin_manager.set_enabled(pid, True)
+            InfoBar.success(L("已启用", "Enabled"),
+                            L(f"{pid} 已启用", f"{pid} enabled"),
+                            parent=self.window(), duration=3000)
+            self.refresh_state()
+            return
         self.btn.setEnabled(False)
         self.btn.setText(L("下载中…", "Downloading…"))
         self.view.install_card(self)
 
+    def _unpublish(self):
+        """下架插件：创建移除 PR。"""
+        pid = self.entry.get("id", "?")
+        name = self._txt(self.entry.get("name"))
+        box = MessageBox(
+            L("下架插件", "Unpublish Plugin"),
+            L(f"确定要下架插件「{name}」吗？\n\n"
+              f"将创建一个 Pull Request 从市场索引中移除该插件，"
+              f"PR 合并后插件不再对用户可见。需要 GitHub 授权。",
+              f"Unpublish plugin \"{name}\"?\n\n"
+              f"This will create a Pull Request removing it from the marketplace index. "
+              f"It will no longer be visible after the PR is merged. GitHub authorization required."),
+            self.window())
+        if not box.exec():
+            return
+        self.view.unpublish_card(self)
+
+
+# ---------- 本地插件页 ----------
+
+class LocalPluginRow(QWidget):
+    """单个本地插件条目。支持增量更新（避免重建导致跳变）。"""
+
+    def __init__(self, rec, parent=None):
+        super().__init__(parent)
+        self._rec = rec
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 4)
+        lay.setSpacing(10)
+
+        # 图标
+        self._icon_label = QLabel(self)
+        self._icon_label.setFixedSize(36, 36)
+        self._icon_label.setAlignment(Qt.AlignCenter)
+        self._set_local_icon(self._icon_label, rec)
+        lay.addWidget(self._icon_label, 0, Qt.AlignTop)
+
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        name = _i18n_text(rec.display_name)
+        ver = rec.display_version or ""
+        self._title_label = StrongBodyLabel(f"{name}  {ver}".strip(), self)
+        col.addWidget(self._title_label)
+        self._desc_label = CaptionLabel("", self)
+        self._desc_label.setWordWrap(True)
+        self._update_desc(rec)
+        col.addWidget(self._desc_label)
+        self._state_label = CaptionLabel("", self)
+        col.addWidget(self._state_label)
+        self._error_label = None
+        self._update_state(rec)
+        lay.addLayout(col, 1)
+
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(4)
+        self._switch = SwitchButton()
+        self._switch.blockSignals(True)
+        self._switch.setChecked(rec.state == "loaded")
+        self._switch.blockSignals(False)
+        self._switch.checkedChanged.connect(
+            lambda v, pid=rec.pid: plugin_manager.set_enabled(pid, v))
+        btn_row1 = QHBoxLayout()
+        btn_row1.addWidget(self._switch)
+        reload_btn = PushButton(L("重载", "Reload"), self)
+        reload_btn.clicked.connect(lambda _=False, pid=rec.pid: self._reload(pid))
+        btn_row1.addWidget(reload_btn)
+        btn_row1.addStretch(1)
+        btn_col.addLayout(btn_row1)
+        self._del_btn = PushButton(L("删除", "Remove"), self)
+        self._del_btn.clicked.connect(
+            lambda _=False, pid=rec.pid, nm=_i18n_text(rec.display_name): self._remove(pid, nm))
+        btn_row2 = QHBoxLayout()
+        btn_row2.addWidget(self._del_btn)
+        btn_row2.addStretch(1)
+        btn_col.addLayout(btn_row2)
+        lay.addLayout(btn_col)
+
+    # ---------- 增量更新 ----------
+
+    def update_from_record(self, rec):
+        """根据最新的 _PluginRecord 增量更新显示。"""
+        self._rec = rec
+        # 更新标题
+        name = _i18n_text(rec.display_name)
+        ver = rec.display_version or ""
+        self._title_label.setText(f"{name}  {ver}".strip())
+        self._del_btn.clicked.disconnect()
+        self._del_btn.clicked.connect(
+            lambda _=False, pid=rec.pid, nm=name: self._remove(pid, nm))
+        # 更新描述
+        self._update_desc(rec)
+        # 更新状态
+        self._update_state(rec)
+        # 更新开关（不触发信号）
+        self._switch.blockSignals(True)
+        self._switch.setChecked(rec.state == "loaded")
+        self._switch.blockSignals(False)
+
+    def _update_desc(self, rec):
+        """更新作者/描述行。"""
+        desc_parts = []
+        author = rec.display_author
+        if author:
+            desc_parts.append(str(author))
+        desc = _i18n_text(rec.display_description)
+        if desc:
+            desc_parts.append(desc)
+        self._desc_label.setText(" · ".join(desc_parts))
+
+    def _update_state(self, rec):
+        """更新状态文本和错误行。"""
+        state_map = {
+            "loaded": L("运行中", "Running"),
+            "disabled": L("已禁用", "Disabled"),
+            "error": L("加载失败", "Load failed"),
+            "unloaded": L("未加载", "Not loaded"),
+        }
+        state_text = state_map.get(rec.state, rec.state)
+        self._state_label.setText(L(f"状态：{state_text}", f"State: {state_text}"))
+        if rec.state == "error":
+            self._state_label.setStyleSheet("color:#e81123;")
+            self._state_label.setToolTip(rec.error or "")
+        else:
+            self._state_label.setStyleSheet("")
+            self._state_label.setToolTip("")
+        # 错误详情行
+        if self._error_label is not None:
+            self._error_label.setParent(None)
+            self._error_label = None
+        if rec.state == "error" and rec.error:
+            self._error_label = CaptionLabel(str(rec.error).splitlines()[0], self)
+            self._error_label.setStyleSheet("color:#e81123;")
+            self._error_label.setWordWrap(True)
+            # 插入到 state_label 后面
+            lay = self.layout()
+            idx = lay.indexOf(self._state_label)
+            lay.insertWidget(idx + 1, self._error_label)
+
+    @staticmethod
+    def _set_local_icon(label: QLabel, rec):
+        """设置本地插件图标：市场图标 > 插件自定义 > 彩色首字。"""
+        from app.services.plugins import resolve_plugin_icon, plugin_icon_path
+        pm = None
+        # 优先用市场图标文件
+        ip = plugin_icon_path(rec.pid)
+        if ip:
+            pm = QPixmap(ip)
+        # 其次用插件类 icon 属性（rec.plugin 可能因禁用而为 None，用缓存的 display_icon）
+        if pm is None:
+            ic = resolve_plugin_icon(rec.plugin, rec.pid, rec.path,
+                                     icon_val=rec.display_icon)
+            if ic is not None:
+                try:
+                    pm = ic.pixmap(36, 36)
+                except Exception:
+                    pm = None
+        if pm is not None and not pm.isNull():
+            label.setPixmap(pm.scaled(36, 36, Qt.KeepAspectRatio,
+                                      Qt.SmoothTransformation))
+            return
+        # 兜底：彩色首字块
+        name = _i18n_text(rec.display_name)
+        ch = (str(name)[:1] or "?").upper()
+        label.setText(ch)
+        label.setStyleSheet(
+            f"color:white; font-size:16px; font-weight:600;"
+            f"background:{_fallback_color({'id': rec.pid})};"
+            f" border-radius:6px;")
+
+    def _reload(self, pid):
+        ok = plugin_manager.reload(pid)
+        if not ok:
+            rec = plugin_manager.record(pid)
+            msg = rec.error if rec and rec.error else L("未知错误", "Unknown error")
+            InfoBar.error(L("重载失败", "Reload failed"), str(msg).splitlines()[0],
+                          parent=self.window(), duration=5000)
+
+    def _remove(self, pid, name):
+        box = MessageBox(L("删除插件", "Remove Plugin"),
+                         L(f"确定删除插件\"{name}\"？插件文件将从磁盘移除。",
+                           f"Remove plugin \"{name}\"? Its files will be deleted."),
+                         self.window())
+        if not box.exec():
+            return
+        if plugin_manager.remove(pid):
+            InfoBar.success(L("已删除", "Removed"), name, parent=self.window())
+
+
+class LocalPluginsPage(QWidget):
+    """本地插件管理页。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("localPluginsPage")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 8, 0, 0)
+        root.setSpacing(12)
+
+        warn = CaptionLabel(L(
+            "插件为第三方代码，拥有与主程序相同的权限，请仅安装可信来源的插件；"
+            "插件行为同样受免责声明约束。",
+            "Plugins are third-party code with the same privileges as the app. "
+            "Only install from trusted sources; the disclaimer applies."), self)
+        warn.setWordWrap(True)
+        root.addWidget(warn)
+
+        self.listHost = QWidget(self)
+        self.listLay = QVBoxLayout(self.listHost)
+        self.listLay.setContentsMargins(0, 0, 0, 0)
+        self.listLay.setSpacing(2)
+        self.listLay.addStretch(1)
+        root.addWidget(self.listHost, 1)
+
+        brow = QHBoxLayout()
+        importBtn = PushButton(L("导入插件…", "Import Plugin…"), self)
+        importBtn.clicked.connect(self._import_plugin)
+        brow.addWidget(importBtn)
+        dirBtn = PushButton(L("打开插件目录", "Open Plugin Folder"), self)
+        dirBtn.clicked.connect(self._open_dir)
+        brow.addWidget(dirBtn)
+        rescanBtn = PushButton(L("重新扫描", "Rescan"), self)
+        rescanBtn.clicked.connect(self._rescan)
+        brow.addWidget(rescanBtn)
+        brow.addStretch(1)
+        root.addLayout(brow)
+
+        plugin_manager.changed.connect(lambda: QTimer.singleShot(0, self.refresh))
+        self.refresh()
+
+    def refresh(self):
+        """增量刷新本地插件列表：保留已有行，只更新变化部分。"""
+        records = plugin_manager.discover()
+        # 收集现有行
+        existing = {}
+        for i in range(self.listLay.count()):
+            w = self.listLay.itemAt(i).widget()
+            if w is not None and isinstance(w, LocalPluginRow):
+                existing[w._rec.pid] = w
+        # 按最新 records 顺序更新/添加
+        seen = set()
+        row_index = 0
+        for rec in records:
+            pid = rec.pid
+            seen.add(pid)
+            row = existing.get(pid)
+            if row is not None:
+                row.update_from_record(rec)
+                current_idx = self.listLay.indexOf(row)
+                if current_idx != row_index:
+                    self.listLay.removeWidget(row)
+                    self.listLay.insertWidget(row_index, row)
+            else:
+                new_row = LocalPluginRow(rec, self)
+                self.listLay.insertWidget(row_index, new_row)
+            row_index += 1
+        # 删除已不存在的行
+        for pid, row in existing.items():
+            if pid not in seen:
+                row.setParent(None)
+                row.deleteLater()
+        # 空状态提示
+        empty_label = None
+        for i in range(self.listLay.count()):
+            w = self.listLay.itemAt(i).widget()
+            if w is not None and not isinstance(w, LocalPluginRow):
+                empty_label = w
+                break
+        if not records:
+            if empty_label is None:
+                empty_label = CaptionLabel(L(
+                    "暂无插件。点击\"导入插件…\"添加 .py 插件文件，"
+                    "或将插件放入插件目录后重新扫描。",
+                    "No plugins yet. Use \"Import Plugin…\" to add a .py file, "
+                    "or drop plugins into the folder and rescan."), self)
+                empty_label.setWordWrap(True)
+                self.listLay.insertWidget(0, empty_label)
+        elif empty_label is not None:
+            empty_label.setParent(None)
+            empty_label.deleteLater()
+
+    def _import_plugin(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, L("选择插件文件", "Select plugin file"),
+            "", L("Python 插件 (*.py);;所有文件 (*.*)", "Python plugin (*.py);;All files (*.*)"))
+        if not path:
+            return
+        ok, msg = plugin_manager.import_from(path)
+        if ok:
+            InfoBar.success(L("导入成功", "Imported"),
+                            L("插件已导入并启用", "Plugin imported and enabled"),
+                            parent=self.window(), duration=3000)
+        else:
+            InfoBar.error(L("导入失败", "Import failed"), msg,
+                          parent=self.window(), duration=5000)
+
+    def _open_dir(self):
+        os.startfile(plugins_dir())
+
+    def _rescan(self):
+        n = plugin_manager.load_all()
+        self.refresh()
+        InfoBar.success(L("扫描完成", "Rescan done"),
+                        L(f"共加载 {n} 个插件", f"{n} plugin(s) loaded"),
+                        parent=self.window(), duration=2500)
+
+
+# ---------- 插件市场页 ----------
+
+class PluginMarketPage(QWidget):
+    """插件市场浏览页。"""
+
+    # 跨线程信号：下架流程
+    unpubAuthNeeded = Signal(str, str)       # code, uri（设备授权时浏览器打开）
+    unpubAuthOk = Signal(object, str, object)  # entry, token, card
+    unpubOk = Signal(str, bool, object)      # url, is_direct, card
+    unpubErr = Signal(str, object)           # msg, card
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.unpubAuthNeeded.connect(self._on_unpub_auth_needed)
+        self.unpubAuthOk.connect(lambda e, t, c: self._do_unpublish(e, t, c))
+        self.unpubOk.connect(self._on_unpub_ok)
+        self.unpubErr.connect(self._on_unpub_err)
+        self.setObjectName("pluginMarketPage")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 8, 0, 0)
+        root.setSpacing(10)
+
+        # 搜索 + 工具栏
+        topbar = QHBoxLayout()
+        topbar.setSpacing(10)
+        self.searchEdit = SearchLineEdit(self)
+        self.searchEdit.setPlaceholderText(L("搜索插件名称、作者、描述…",
+                                             "Search by name, author, description…"))
+        self.searchEdit.setClearButtonEnabled(True)
+        self.searchEdit.textChanged.connect(self._apply_filter)
+        topbar.addWidget(self.searchEdit, 1)
+        self.pubBtn = PushButton(L("发布插件…", "Publish a Plugin…"), self)
+        self.pubBtn.clicked.connect(self._publish)
+        topbar.addWidget(self.pubBtn)
+        self.refreshBtn = PushButton(L("刷新", "Refresh"), self)
+        self.refreshBtn.clicked.connect(self._load)
+        topbar.addWidget(self.refreshBtn)
+        root.addLayout(topbar)
+
+        self.statusLabel = CaptionLabel(L("正在加载市场…", "Loading marketplace…"), self)
+        root.addWidget(self.statusLabel)
+        self.spinner = IndeterminateProgressRing(self)
+        self.spinner.setFixedSize(28, 28)
+        root.addWidget(self.spinner, 0, Qt.AlignCenter)
+
+        self.listHost = QWidget(self)
+        self.listLay = QVBoxLayout(self.listHost)
+        self.listLay.setContentsMargins(0, 0, 0, 0)
+        self.listLay.setSpacing(8)
+        self.listLay.addStretch(1)
+        root.addWidget(self.listHost, 1)
+
+        self.client = MarketClient()
+        self.client.index_ready.connect(self._on_index)
+        self.client.fetch_error.connect(self._on_error)
+        self.client.download_ready.connect(self._on_downloaded)
+        self.client.download_failed.connect(self._on_download_failed)
+        plugin_manager.changed.connect(lambda: QTimer.singleShot(0, self._refresh_buttons))
+        self._all_cards = []
+        self._load()
+
+    def _load(self):
+        self.statusLabel.setText(L("正在加载市场…", "Loading marketplace…"))
+        self.spinner.show()
+        self._clear_cards()
+        self.client.fetch_index()
+
+    def _clear_cards(self):
+        self._all_cards = []
+        while self.listLay.count() > 1:
+            item = self.listLay.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+
+    def _on_index(self, entries, from_cache):
+        from app.services.updater import APP_VERSION, _ver_tuple
+        self.spinner.hide()
+        self._all_cards = []
+        for e in entries:
+            minv = str(e.get("min_app", ""))
+            if minv and _ver_tuple(minv) > _ver_tuple(APP_VERSION):
+                continue
+            card = MarketCard(e, self)
+            self.listLay.insertWidget(self.listLay.count() - 1, card)
+            self._all_cards.append(card)
+        src = L("（离线缓存）", " (offline cache)") if from_cache else ""
+        total = len(self._all_cards)
+        if total:
+            self.statusLabel.setText(L(f"共 {total} 个插件{src}", f"{total} plugin(s){src}"))
+        else:
+            self.statusLabel.setText(L(
+                f"暂无可安装的插件{src}", f"No installable plugins{src}"))
+        self._apply_filter(self.searchEdit.text())
+
+    def _apply_filter(self, kw: str):
+        kw = (kw or "").strip().lower()
+        visible = 0
+        for card in getattr(self, "_all_cards", []):
+            if not kw:
+                card.show()
+                visible += 1
+                continue
+            e = card.entry
+            name = e.get("name", "")
+            if isinstance(name, (tuple, list)):
+                name = " ".join(str(x) for x in name)
+            desc = e.get("description", "")
+            if isinstance(desc, (tuple, list)):
+                desc = " ".join(str(x) for x in desc)
+            hay = " ".join(str(x) for x in (e.get("id", ""), name,
+                                             e.get("author", ""), desc)).lower()
+            match = kw in hay
+            card.setVisible(match)
+            if match:
+                visible += 1
+        if self._all_cards and kw:
+            self.statusLabel.setText(
+                L(f"匹配 {visible} / {len(self._all_cards)} 个插件",
+                  f"{visible} / {len(self._all_cards)} plugin(s) match"))
+
+    def _on_error(self, msg):
+        self.spinner.hide()
+        self.statusLabel.setText(L(
+            f"市场加载失败：{msg}\n请检查网络后点击\"刷新\"。",
+            f"Failed to load marketplace: {msg}\nCheck your network and hit Refresh."))
+
+    def _refresh_buttons(self):
+        for i in range(self.listLay.count()):
+            w = self.listLay.itemAt(i).widget()
+            if isinstance(w, MarketCard):
+                w.refresh_state()
+
+    def install_card(self, card: MarketCard):
+        self._active_card = card
+        self.client.install(card.entry)
+
+    def unpublish_card(self, card: MarketCard):
+        """下架插件：需要 GitHub 授权后创建移除 PR。"""
+        entry = card.entry
+        pid = entry.get("id", "?")
+        token = (settings.github_token or "").strip()
+        card.unpubBtn.setEnabled(False)
+        card.unpubBtn.setText(L("下架中…", "Unpublishing…"))
+        if not token:
+            if GITHUB_OAUTH_CLIENT_ID:
+                self._unpublish_device_flow(entry, card)
+            else:
+                card.unpubBtn.setEnabled(True)
+                card.unpubBtn.setText(L("下架", "Unpublish"))
+                InfoBar.warning(L("需要授权", "Authorization required"),
+                                L("请先发布一个插件完成授权，下架也需要 GitHub 身份。",
+                                  "Publish a plugin first to complete authorization; unpublish also requires GitHub identity."),
+                                parent=self.window(), duration=6000)
+            return
+        # 后台检查 scope 后执行下架
+        def _check():
+            try:
+                scopes = gh_check_scopes(token)
+                if "workflow" not in scopes and gh_can_push(token):
+                    settings.set("github_token", "")
+                    self._unpublish_device_flow(entry, card)
+                    return
+            except Exception:
+                pass
+            self._do_unpublish(entry, token, card)
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _unpublish_device_flow(self, entry, card):
+        """无 Token 时走浏览器设备授权后再下架。"""
+        def _work():
+            try:
+                d = device_flow_start()
+                code = str(d["user_code"])
+                uri = str(d.get("verification_uri_complete")
+                          or f"{d['verification_uri']}?user_code={code}")
+                self.unpubAuthNeeded.emit(code, uri)
+                token = device_flow_poll(d["device_code"],
+                                         d.get("interval", 5),
+                                         d.get("expires_in", 900))
+                settings.set("github_token", token)
+                self.unpubAuthOk.emit(entry, token, card)
+            except Exception as e:
+                self.unpubErr.emit(str(e), card)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_unpub_auth_needed(self, code, uri):
+        """主线程：打开浏览器进行设备授权。"""
+        QDesktopServices.openUrl(QUrl(uri))
+        InfoBar.info(L("需要授权", "Authorization required"),
+                     L(f"请在浏览器中授权（代码 {code}），授权后将自动继续下架。",
+                       f"Authorize in browser (code {code}), unpublish will continue automatically."),
+                     parent=self.window(), duration=10000)
+
+    def _do_unpublish(self, entry, token, card):
+        """后台线程执行下架。"""
+        def _work():
+            try:
+                url, is_direct = self._github_unpublish(token, entry)
+                self.unpubOk.emit(url, is_direct, card)
+            except Exception as e:
+                self.unpubErr.emit(str(e), card)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_unpub_ok(self, url, is_direct, card):
+        card.unpubBtn.setEnabled(True)
+        card.unpubBtn.setText(L("下架", "Unpublish"))
+        pid = card.entry.get("id", "?")
+        if is_direct:
+            InfoBar.success(L("下架成功", "Unpublished"),
+                            L(f"插件 {pid} 已从市场下架，其他用户刷新后不再显示。",
+                              f"Plugin {pid} removed from marketplace. It disappears for others after refresh."),
+                            parent=self.window(), duration=6000)
+            # 直接下架成功，从列表移除卡片
+            self._remove_card_from_list(card)
+        else:
+            InfoBar.success(L("下架成功", "Unpublished"),
+                            L(f"插件 {pid} 的下架请求已提交，将在几秒内自动生效。",
+                              f"Unpublish request for {pid} submitted. It will take effect within seconds."),
+                            parent=self.window(), duration=6000)
+
+    def _remove_card_from_list(self, card):
+        """从市场列表中移除一张卡片（下架成功后调用）。"""
+        card.setParent(None)
+        if card in self._all_cards:
+            self._all_cards.remove(card)
+        self._apply_filter()
+        count = len([c for c in self._all_cards if isinstance(c, MarketCard)])
+        self.statusLabel.setText(
+            L(f"共 {count} 个插件", f"{count} plugin(s) total"))
+
+    def _on_unpub_err(self, msg, card):
+        card.unpubBtn.setEnabled(True)
+        card.unpubBtn.setText(L("下架", "Unpublish"))
+        if "401" in msg or "Bad credentials" in msg:
+            settings.set("github_token", "")
+        InfoBar.error(L("下架失败", "Unpublish failed"), msg,
+                      parent=self.window(), duration=8000)
+
+    @staticmethod
+    def _github_unpublish(token, entry):
+        """下架插件。
+
+        - 有写权限：直接从 master 删除索引条目和插件文件，立即生效。
+        - 无写权限：Fork + 分支 + PR。
+        返回 (url, is_direct)。
+        """
+        pid = entry.get("id", "?")
+        headers = gh_headers(token)
+        upstream = f"{_GH_API}/repos/{_REPO_OWNER}/{_REPO_NAME}"
+        username = gh_get_user(token)
+        can_push = gh_can_push(token)
+        idx_path = f"{_MARKET_DIR}/plugins-index.json"
+        plugin_path = f"{_MARKET_DIR}/{pid}.py"
+
+        def _remove_from_index(repo_api, branch):
+            idx_data, idx_sha = gh_get_json_file(repo_api, idx_path, branch, headers)
+            if idx_data is None:
+                raise Exception("plugins-index.json not found")
+            before = len(idx_data.get("plugins", []))
+            idx_data["plugins"] = [p for p in idx_data.get("plugins", [])
+                                   if p.get("id") != pid]
+            if before == len(idx_data["plugins"]):
+                raise Exception(f"Plugin {pid} not found in index")
+            new_b64 = base64.b64encode(
+                json.dumps(idx_data, ensure_ascii=False, indent=2).encode()).decode()
+            gh_put_file(repo_api, idx_path, new_b64,
+                        f"Unpublish plugin: {pid}", branch, headers, idx_sha)
+
+        # ---------- 路径 A：直接提交到 master ----------
+        if can_push:
+            try:
+                gh_ensure_workflow(token)
+            except NeedsReauth:
+                settings.set("github_token", "")
+                raise Exception(L(
+                    "授权已过期，请重新下架以完成授权。",
+                    "Authorization needs refresh. Please unpublish again to re-authorize."))
+            _remove_from_index(upstream, _REPO_BRANCH)
+            # 同时删除插件源码文件（如果存在）
+            file_sha = gh_file_sha(upstream, plugin_path, _REPO_BRANCH, headers)
+            if file_sha:
+                try:
+                    gh_delete_file(upstream, plugin_path,
+                                   f"Remove plugin file: {pid}",
+                                   _REPO_BRANCH, headers, file_sha)
+                except Exception:
+                    pass
+            return (f"https://github.com/{_REPO_OWNER}/{_REPO_NAME}/commits/{_REPO_BRANCH}",
+                    True)
+
+        # ---------- 路径 B：Fork + PR ----------
+        r = requests.post(f"{upstream}/forks", headers=headers, timeout=30)
+        if r.status_code not in (200, 202):
+            r.raise_for_status()
+        fork_api = f"{_GH_API}/repos/{r.json()['full_name']}"
+        fork_full = r.json()["full_name"]
+
+        import time as _t
+        for _ in range(10):
+            if requests.get(fork_api, headers=headers, timeout=10).status_code == 200:
+                break
+            _t.sleep(1)
+        try:
+            requests.post(f"{fork_api}/merge-upstream", headers=headers,
+                          json={"branch": _REPO_BRANCH}, timeout=15)
+        except Exception:
+            pass
+
+        r = requests.get(f"{fork_api}/git/refs/heads/{_REPO_BRANCH}",
+                         headers=headers, timeout=10)
+        r.raise_for_status()
+        master_sha = r.json()["object"]["sha"]
+        branch = f"unpublish-plugin/{pid}"
+        requests.delete(f"{fork_api}/git/refs/heads/{branch}",
+                        headers=headers, timeout=10)
+        r = requests.post(f"{fork_api}/git/refs", headers=headers, json={
+            "ref": f"refs/heads/{branch}", "sha": master_sha,
+        }, timeout=10)
+        r.raise_for_status()
+
+        _remove_from_index(fork_api, branch)
+
+        r = requests.post(f"{upstream}/pulls", headers=headers, json={
+            "title": f"Unpublish plugin: {pid}",
+            "head": f"{fork_full.split('/')[0]}:{branch}",
+            "base": _REPO_BRANCH,
+            "body": f"## 下架插件\n\n- **插件 ID**: {pid}\n- **名称**: {entry.get('name', '')}\n\n"
+                    f"由 NetPulse 插件市场一键下架功能自动创建。",
+        }, timeout=15)
+        if r.status_code not in (200, 201):
+            raise Exception(f"PR creation failed ({r.status_code}): {r.text}")
+        return r.json()["html_url"], False
+
+    def _on_downloaded(self, entry, tmp_path):
+        ok, msg = plugin_manager.import_from(tmp_path)
+        try:
+            shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
+        except Exception:
+            pass
+        if ok:
+            # 保存市场图标到本地，供导航栏和本地列表使用
+            self._save_plugin_icon(entry)
+            InfoBar.success(L("安装成功", "Installed"),
+                            L(f"{entry.get('id')} 已安装并启用",
+                              f"{entry.get('id')} installed and enabled"),
+                            parent=self.window(), duration=4000)
+        else:
+            InfoBar.error(L("安装失败", "Install failed"), msg,
+                          parent=self.window(), duration=6000)
+        self._refresh_buttons()
+
+    @staticmethod
+    def _save_plugin_icon(entry: dict):
+        """把市场条目的图标（data URI 或 URL）保存为 {pid}.icon.png。"""
+        pid = entry.get("id", "")
+        if not pid:
+            return
+        icon_val = entry.get("icon", "")
+        if not icon_val:
+            return
+        try:
+            data = None
+            if isinstance(icon_val, str) and icon_val.startswith("data:"):
+                # data:image/png;base64,xxxx
+                header, b64 = icon_val.split(",", 1)
+                data = base64.b64decode(b64)
+            elif isinstance(icon_val, str) and icon_val.startswith("http"):
+                r = requests.get(icon_val, timeout=10)
+                r.raise_for_status()
+                data = r.content
+            if data:
+                from app.services.plugins import plugins_dir
+                dst = os.path.join(plugins_dir(), f"{pid}.icon.png")
+                with open(dst, "wb") as f:
+                    f.write(data)
+        except Exception:
+            pass
+
+    def _on_download_failed(self, pid, msg):
+        InfoBar.error(L("下载失败", "Download failed"),
+                      L(f"{pid}：{msg}", f"{pid}: {msg}"),
+                      parent=self.window(), duration=6000)
+        self._refresh_buttons()
+
+    def _publish(self):
+        PublishDialog(self.window()).exec()
+
+
+# ---------- 插件主页面（Pivot 容器） ----------
+
 
 class MarketView(ScrollArea):
-    """插件市场导航页。"""
+    """插件页面：Pivot 切换本地插件 / 插件市场。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -159,194 +1086,192 @@ class MarketView(ScrollArea):
 
         root = QVBoxLayout(self.view)
         root.setContentsMargins(36, 24, 36, 24)
-        root.setSpacing(16)
+        root.setSpacing(12)
 
-        root.addWidget(SubtitleLabel(L("插件市场", "Plugin Marketplace"), self.view))
+        root.addWidget(SubtitleLabel(L("插件", "Plugins"), self.view))
 
-        # 工具栏
-        bar = QHBoxLayout()
-        tip = CaptionLabel(L(
-            "插件来自社区作者，安装前请自行评估（详见免责声明）。",
-            "Plugins are community code; review before installing (see disclaimer)."), self.view)
-        bar.addWidget(tip, 1)
-        self.pubBtn = PushButton(L("发布插件…", "Publish a Plugin…"), self.view)
-        self.pubBtn.clicked.connect(self._publish)
-        bar.addWidget(self.pubBtn)
-        self.refreshBtn = PushButton(L("刷新", "Refresh"), self.view)
-        self.refreshBtn.clicked.connect(self._load)
-        bar.addWidget(self.refreshBtn)
-        root.addLayout(bar)
+        self.pivot = Pivot(self.view)
+        self.stack = QStackedWidget(self.view)
 
-        # 状态行
-        self.statusLabel = CaptionLabel(L("正在加载市场…", "Loading marketplace…"), self.view)
-        root.addWidget(self.statusLabel)
-        self.spinner = IndeterminateProgressRing(self.view)
-        self.spinner.setFixedSize(28, 28)
-        root.addWidget(self.spinner, 0, Qt.AlignCenter)
+        self.localPage = LocalPluginsPage(self.view)
+        self.marketPage = PluginMarketPage(self.view)
 
-        # 插件卡片列表
-        self.listHost = QWidget(self.view)
-        self.listLay = QVBoxLayout(self.listHost)
-        self.listLay.setContentsMargins(0, 0, 0, 0)
-        self.listLay.setSpacing(8)
-        self.listLay.addStretch(1)
-        root.addWidget(self.listHost)
-        root.addStretch(1)
+        self.stack.addWidget(self.localPage)
+        self.stack.addWidget(self.marketPage)
 
-        self.client = MarketClient()
-        self.client.index_ready.connect(self._on_index)
-        self.client.fetch_error.connect(self._on_error)
-        self.client.download_ready.connect(self._on_downloaded)
-        self.client.download_failed.connect(self._on_download_failed)
-        # 插件启停/删除后刷新按钮状态
-        plugin_manager.changed.connect(lambda: QTimer.singleShot(0, self._refresh_buttons))
-        self._load()
+        self.pivot.addItem(
+            routeKey="local",
+            text=L("本地插件", "Local Plugins"),
+            onClick=lambda: self.stack.setCurrentWidget(self.localPage))
+        self.pivot.addItem(
+            routeKey="market",
+            text=L("插件市场", "Marketplace"),
+            onClick=lambda: self.stack.setCurrentWidget(self.marketPage))
+        self.pivot.setCurrentItem("market")
+        self.stack.setCurrentWidget(self.marketPage)
 
-    # ---------- 加载 ----------
-    def _load(self):
-        self.statusLabel.setText(L("正在加载市场…", "Loading marketplace…"))
-        self.spinner.show()
-        self._clear_cards()
-        self.client.fetch_index()
+        root.addWidget(self.pivot)
+        root.addWidget(self.stack, 1)
 
-    def _clear_cards(self):
-        while self.listLay.count() > 1:
-            item = self.listLay.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
 
-    def _on_index(self, entries, from_cache):
-        from app.services.updater import APP_VERSION, _ver_tuple
-        self.spinner.hide()
-        shown = 0
-        for e in entries:
-            minv = str(e.get("min_app", ""))
-            if minv and _ver_tuple(minv) > _ver_tuple(APP_VERSION):
-                continue  # 需要更新程序才能安装，暂不展示
-            self.listLay.insertWidget(self.listLay.count() - 1, MarketCard(e, self))
-            shown += 1
-        src = L("（离线缓存）", " (offline cache)") if from_cache else ""
-        if shown:
-            self.statusLabel.setText(L(f"共 {shown} 个插件{src}", f"{shown} plugin(s){src}"))
-        else:
-            self.statusLabel.setText(L(
-                f"暂无可安装的插件{src}", f"No installable plugins{src}"))
-
-    def _on_error(self, msg):
-        self.spinner.hide()
-        self.statusLabel.setText(L(
-            f"市场加载失败：{msg}\n请检查网络后点击“刷新”。",
-            f"Failed to load marketplace: {msg}\nCheck your network and hit Refresh."))
-
-    def _refresh_buttons(self):
-        for i in range(self.listLay.count()):
-            w = self.listLay.itemAt(i).widget()
-            if isinstance(w, MarketCard):
-                w.refresh_state()
-
-    # ---------- 安装流 ----------
-    def install_card(self, card: MarketCard):
-        self._active_card = card
-        self.client.install(card.entry)
-
-    def _on_downloaded(self, entry, tmp_path):
-        ok, msg = plugin_manager.import_from(tmp_path)
-        try:
-            shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
-        except Exception:
-            pass
-        from qfluentwidgets import InfoBar
-        if ok:
-            InfoBar.success(L("安装成功", "Installed"),
-                            L(f"{entry.get('id')} 已安装并启用",
-                              f"{entry.get('id')} installed and enabled"),
-                            parent=self.window(), duration=4000)
-        else:
-            InfoBar.error(L("安装失败", "Install failed"), msg,
-                          parent=self.window(), duration=6000)
-        self._refresh_buttons()
-
-    def _on_download_failed(self, pid, msg):
-        from qfluentwidgets import InfoBar
-        InfoBar.error(L("下载失败", "Download failed"),
-                      L(f"{pid}：{msg}", f"{pid}: {msg}"),
-                      parent=self.window(), duration=6000)
-        self._refresh_buttons()
-
-    # ---------- 发布 ----------
-    def _publish(self):
-        PublishDialog(self.window()).exec()
-
+# ---------- 发布对话框 ----------
 
 class PublishDialog(MessageBoxBase):
-    """发布向导：生成含图标的索引条目 JSON，引导提交 PR 上架。"""
+    """发布向导：生成条目 JSON，支持一键通过 GitHub API 提交 PR。"""
+
+    # 工作线程拿到设备码后发回主线程，由主线程打开浏览器（跨线程 GUI 操作必须用信号）
+    deviceReady = Signal(str, str)   # user_code, verification_uri
+    proceedWithPublish = Signal(object, str)  # entry, token（授权成功后回主线程发布）
+    reauthNeeded = Signal(object)    # entry（旧 token scope 不足，需重新授权）
+    statusUpdate = Signal(str)       # 发布过程中的状态文字
+    publishOk = Signal(str)          # pr_url
+    publishFailed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(L("发布插件到市场", "Publish to Marketplace"))
-        self.widget.setMinimumWidth(600)
+        self.widget.setMinimumWidth(620)
         self._icon_data_uri = ""
+        self.deviceReady.connect(self._on_device_ready)
+        self.proceedWithPublish.connect(self._do_publish)
+        self.reauthNeeded.connect(self._device_login_then_publish)
+        self.publishOk.connect(self._on_publish_ok)
+        self.publishFailed.connect(self._on_publish_err)
 
-        self.titleLabel = StrongBodyLabel(L("发布插件到市场", "Publish to Marketplace"))
+        self.titleLabel = StrongBodyLabel(
+            L("发布插件到市场", "Publish to Marketplace"), self.widget)
         self.viewLayout.addWidget(self.titleLabel)
 
         steps = BodyLabel(L(
             "上架流程（免费，无需服务器）：\n"
-            "1. 把插件 .py 文件托管到任意可公开直链下载的地址（推荐你自己的 GitHub 仓库）；\n"
-            "2. 生成下方条目 JSON，把 file 改成插件的下载直链；\n"
-            "3. 打开提交页面，把条目加入 plugins 数组并提交 PR，合并后即上架。",
+            "1. 选择要发布的本地插件和图标；\n"
+            "2. 首次点击\"一键发布\"会打开浏览器，点一次\"授权\"即可；\n"
+            "3. 之后每次发布只需一键，PR 合并后即上架。",
             "How publishing works (free, no server):\n"
-            "1. Host your plugin .py file anywhere publicly downloadable (your GitHub repo recommended);\n"
-            "2. Generate the entry below and set file to the direct download URL;\n"
-            "3. Open the submission page, add the entry to the plugins array and open a PR. "
-            "It goes live once merged."))
+            "1. Pick the local plugin and icon;\n"
+            "2. The first \"Publish\" click opens your browser for a one-time authorization;\n"
+            "3. After that every publish is one click. It goes live once the PR is merged."),
+            self.widget)
         steps.setWordWrap(True)
         self.viewLayout.addWidget(steps)
 
+        # 本地插件选择
         row = QHBoxLayout()
-        row.addWidget(BodyLabel(L("本地插件", "Local plugin")))
-        self.combo = QComboBox()
+        row.addWidget(BodyLabel(L("本地插件", "Local plugin"), self.widget))
+        self.combo = ComboBox(self.widget)
+        self._combo_pids = []
         for rec in plugin_manager.records():
             if rec.plugin is not None:
-                self.combo.addItem(f"{rec.pid} (v{getattr(rec.plugin, 'version', '?')})", rec.pid)
+                self.combo.addItem(
+                    f"{rec.pid} (v{getattr(rec.plugin, 'version', '?')})")
+                self._combo_pids.append(rec.pid)
+        self.combo.currentIndexChanged.connect(lambda _i: self._generate())
         row.addWidget(self.combo, 1)
         self.viewLayout.addLayout(row)
 
         # 图标选择
         irow = QHBoxLayout()
-        self.iconPreview = QLabel(L("无图标", "No icon"))
+        self.iconPreview = QLabel(L("无图标", "No icon"), self.widget)
         self.iconPreview.setFixedSize(_ICON_SIZE, _ICON_SIZE)
         self.iconPreview.setAlignment(Qt.AlignCenter)
         irow.addWidget(self.iconPreview)
-        pickBtn = PushButton(L("选择图标 (PNG/JPG)…", "Pick Icon (PNG/JPG)…"))
+        pickBtn = PushButton(L("选择图标 (PNG/JPG)…", "Pick Icon (PNG/JPG)…"), self.widget)
         pickBtn.clicked.connect(self._pick_icon)
         irow.addWidget(pickBtn)
         irow.addStretch(1)
         self.viewLayout.addLayout(irow)
 
-        from qfluentwidgets import TextEdit
-        self.jsonBox = TextEdit()
+        # GitHub Token（仅在既无缓存又未配置浏览器一键授权时才显示）
+        self.tokenRow = QWidget(self.widget)
+        trow = QHBoxLayout(self.tokenRow)
+        trow.setContentsMargins(0, 0, 0, 0)
+        trow.addWidget(BodyLabel(L("GitHub Token", "GitHub Token"), self.tokenRow))
+        from qfluentwidgets import PasswordLineEdit
+        self.tokenEdit = PasswordLineEdit(self.tokenRow)
+        self.tokenEdit.setPlaceholderText(
+            L("ghp_xxxxxxxxxxxx（public_repo, workflow 权限）",
+              "ghp_xxxxxxxxxxxx (public_repo, workflow)"))
+        saved = settings.github_token or ""
+        if saved:
+            self.tokenEdit.setText(saved)
+        trow.addWidget(self.tokenEdit, 1)
+        tokenLink = PushButton(L("获取 Token", "Get Token"), self.tokenRow)
+        tokenLink.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/settings/tokens/new?scopes=public_repo,workflow&description=NetPulse%20Plugin%20Publish")))
+        trow.addWidget(tokenLink)
+        self.viewLayout.addWidget(self.tokenRow)
+        if settings.github_token or GITHUB_OAUTH_CLIENT_ID:
+            self.tokenRow.hide()
+
+        # JSON 预览
+        self.jsonBox = TextEdit(self.widget)
         self.jsonBox.setReadOnly(True)
-        self.jsonBox.setFixedHeight(190)
+        self.jsonBox.setFixedHeight(160)
         self.viewLayout.addWidget(self.jsonBox)
 
+        # 按钮行
         btns = QHBoxLayout()
-        genBtn = PushButton(L("生成条目", "Generate"))
-        genBtn.clicked.connect(self._generate)
-        btns.addWidget(genBtn)
-        copyBtn = PushButton(L("复制 JSON", "Copy JSON"))
+        self.publishBtn = PrimaryPushButton(
+            L("一键发布", "Publish (1-Click)"), self.widget)
+        self.publishBtn.clicked.connect(self._one_click_publish)
+        btns.addWidget(self.publishBtn)
+        copyBtn = PushButton(L("复制 JSON", "Copy JSON"), self.widget)
         copyBtn.clicked.connect(self._copy)
         btns.addWidget(copyBtn)
-        openBtn = PushButton(L("打开提交页面", "Open Submission Page"))
+        openBtn = PushButton(L("手动提交页面", "Manual Submission"), self.widget)
         openBtn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(INDEX_EDIT_URL)))
         btns.addWidget(openBtn)
         btns.addStretch(1)
         self.viewLayout.addLayout(btns)
 
+        # 设备授权码展示区（拿到设备码时显示，大字号 + 一键复制）
+        self.codePanel = QWidget(self.widget)
+        self.codePanel.setObjectName("codePanel")
+        self.codePanel.setStyleSheet(
+            "#codePanel{background:rgba(0,120,212,0.12); border:1px solid rgba(0,120,212,0.4);"
+            " border-radius:8px;}")
+        cpLay = QVBoxLayout(self.codePanel)
+        cpLay.setContentsMargins(20, 16, 20, 16)
+        cpLay.setSpacing(8)
+        codeHint = BodyLabel(L(
+            "请在浏览器中输入以下授权码，或直接点击复制：",
+            "Enter this code in your browser, or click to copy:"), self.codePanel)
+        cpLay.addWidget(codeHint)
+        codeRow = QHBoxLayout()
+        codeRow.setSpacing(12)
+        self.codeLabel = QLabel("------", self.codePanel)
+        self.codeLabel.setAlignment(Qt.AlignCenter)
+        self.codeLabel.setStyleSheet(
+            "font-size:32px; font-weight:700; letter-spacing:6px;"
+            "font-family:'Consolas','Courier New',monospace; color:#0078D4;")
+        self.codeLabel.setCursor(Qt.PointingHandCursor)
+        self.codeLabel.mousePressEvent = lambda _e: self._copy_device_code()
+        codeRow.addWidget(self.codeLabel, 1)
+        self.copyCodeBtn = PushButton(L("复制代码", "Copy Code"), self.codePanel)
+        self.copyCodeBtn.clicked.connect(self._copy_device_code)
+        codeRow.addWidget(self.copyCodeBtn)
+        cpLay.addLayout(codeRow)
+        self.openBrowserBtn = PushButton(
+            L("重新打开浏览器", "Reopen Browser"), self.codePanel)
+        self.openBrowserBtn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self._device_uri)))
+        cpLay.addWidget(self.openBrowserBtn, 0, Qt.AlignLeft)
+        self.viewLayout.addWidget(self.codePanel)
+        self.codePanel.hide()
+        self._device_uri = ""
+        self._device_code = ""
+
+        # 状态/提示
+        self.statusLabel = CaptionLabel("", self.widget)
+        self.statusLabel.setWordWrap(True)
+        self.viewLayout.addWidget(self.statusLabel)
+        self.statusUpdate.connect(self.statusLabel.setText)
+
         tip = CaptionLabel(L(
-            "图标会以 base64 内嵌进索引（上限 64KB），无需额外托管；sha256 用于完整性校验。",
-            "The icon is base64-embedded in the index (max 64KB), no extra hosting needed; "
-            "sha256 is for integrity."))
+            "图标会以 base64 内嵌进索引（上限 64KB）；sha256 用于完整性校验。"
+            "Token 仅保存在本地，用于创建 PR。",
+            "Icon is base64-embedded in the index (max 64KB); sha256 for integrity. "
+            "Token is stored locally and used only to create the PR."), self.widget)
         tip.setWordWrap(True)
         self.viewLayout.addWidget(tip)
 
@@ -364,11 +1289,9 @@ class PublishDialog(MessageBoxBase):
             with open(path, "rb") as f:
                 data = f.read()
         except Exception as e:
-            from qfluentwidgets import InfoBar
             InfoBar.error(L("读取失败", "Read failed"), str(e), parent=self.window())
             return
         if len(data) > _MAX_ICON_BYTES:
-            from qfluentwidgets import InfoBar
             InfoBar.warning(L("图标过大", "Icon too large"),
                             L(f"上限 64KB，当前 {len(data) // 1024}KB",
                               f"Max 64KB, got {len(data) // 1024}KB"),
@@ -384,11 +1307,12 @@ class PublishDialog(MessageBoxBase):
         self._generate()
 
     def _generate(self):
-        pid = self.combo.currentData()
+        idx = self.combo.currentIndex()
+        pid = self._combo_pids[idx] if 0 <= idx < len(self._combo_pids) else None
         rec = plugin_manager.record(pid) if pid else None
         if rec is None or rec.plugin is None:
             self.jsonBox.setPlainText("")
-            return
+            return None
         p = rec.plugin
         digest = ""
         try:
@@ -406,18 +1330,291 @@ class PublishDialog(MessageBoxBase):
             "version": str(getattr(p, "version", "1.0")),
             "author": str(getattr(p, "author", "") or ""),
             "description": _tup(getattr(p, "description", "")),
-            "file": f"https://raw.githubusercontent.com/YOUR_NAME/YOUR_REPO/main/{rec.pid}.py",
+            "file": f"{rec.pid}.py",
             "sha256": digest,
             "min_app": "1.0.7",
             "homepage": "https://github.com/Carlown/NetPulse",
         }
         if self._icon_data_uri:
             entry["icon"] = self._icon_data_uri
-        self.jsonBox.setPlainText(json.dumps(entry, ensure_ascii=False, indent=2))
+        text = json.dumps(entry, ensure_ascii=False, indent=2)
+        self.jsonBox.setPlainText(text)
+        return entry
 
     def _copy(self):
         QApplication.clipboard().setText(self.jsonBox.toPlainText())
-        from qfluentwidgets import InfoBar
         InfoBar.success(L("已复制", "Copied"),
                         L("条目 JSON 已复制到剪贴板", "Entry JSON copied to clipboard"),
                         parent=self.window(), duration=2500)
+
+    # ---------- 一键发布 ----------
+    def _one_click_publish(self):
+        entry = self._generate()
+        if entry is None:
+            InfoBar.warning(L("无法发布", "Cannot publish"),
+                            L("请先选择一个本地插件", "Please select a local plugin first"),
+                            parent=self.window())
+            return
+        token = (settings.github_token or "").strip() or self.tokenEdit.text().strip()
+        if token and GITHUB_OAUTH_CLIENT_ID:
+            # 后台检查 token scope，不够就自动重新授权
+            def _check():
+                try:
+                    scopes = gh_check_scopes(token)
+                    needs_reauth = "workflow" not in scopes and gh_can_push(token)
+                except Exception:
+                    needs_reauth = False
+                if needs_reauth:
+                    settings.set("github_token", "")
+                    self.reauthNeeded.emit(entry)
+                else:
+                    self.proceedWithPublish.emit(entry, token)
+            threading.Thread(target=_check, daemon=True).start()
+            return
+        if not token:
+            if GITHUB_OAUTH_CLIENT_ID:
+                # 浏览器一键授权（首次一次，之后 Token 自动缓存）
+                self._device_login_then_publish(entry)
+            else:
+                self.tokenRow.show()
+                InfoBar.warning(L("需要授权", "Authorization required"),
+                                L("首次发布请在浏览器中确认授权，或填写 GitHub Token",
+                                  "Confirm authorization in the browser for the first publish, "
+                                  "or enter a GitHub Token"),
+                                parent=self.window())
+            return
+        self._do_publish(entry, token)
+
+    def _device_login_then_publish(self, entry):
+        """浏览器一键授权（GitHub Device Flow）：打开浏览器让用户点一次确认。"""
+        self.publishBtn.setEnabled(False)
+        self.publishBtn.setText(L("正在请求授权…", "Requesting authorization…"))
+        self.statusLabel.setText(L("正在连接 GitHub…", "Connecting to GitHub…"))
+
+        def _work():
+            try:
+                d = device_flow_start()
+                code = str(d["user_code"])
+                # verification_uri_complete 可带码直达，省去手动输入
+                uri = str(d.get("verification_uri_complete")
+                          or f"{d['verification_uri']}?user_code={code}")
+                # 切回主线程打开浏览器 + 更新 UI
+                self.deviceReady.emit(code, uri)
+                token = device_flow_poll(d["device_code"],
+                                         d.get("interval", 5),
+                                         d.get("expires_in", 900))
+                settings.set("github_token", token)
+                self.proceedWithPublish.emit(entry, token)
+            except Exception as e:
+                self.publishFailed.emit(str(e))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_device_ready(self, code: str, uri: str):
+        """主线程：显示大字号授权码面板，打开浏览器到 GitHub 授权页。"""
+        self._device_code = code
+        self._device_uri = uri
+        self.codeLabel.setText(code)
+        self.codePanel.show()
+        self.publishBtn.setText(L("等待浏览器授权…", "Waiting for browser…"))
+        self.statusLabel.setText(L(
+            "请在打开的浏览器中点击「Authorize」完成授权。若浏览器未自动打开，"
+            "请点击下方「重新打开浏览器」，或手动访问 github.com/login/device 并输入代码。",
+            "Click Authorize in the opened browser. If it didn't open, "
+            "click 'Reopen Browser' or visit github.com/login/device and enter the code."))
+        opened = QDesktopServices.openUrl(QUrl(uri))
+        if not opened:
+            InfoBar.warning(L("浏览器未打开", "Browser didn't open"),
+                            L("请点击「重新打开浏览器」按钮或手动复制代码",
+                              "Click 'Reopen Browser' or copy the code manually"),
+                            parent=self.window(), duration=6000)
+
+    def _copy_device_code(self):
+        """复制设备授权码到剪贴板。"""
+        if not self._device_code:
+            return
+        QApplication.clipboard().setText(self._device_code)
+        InfoBar.success(L("已复制", "Copied"),
+                        L(f"授权码 {self._device_code} 已复制",
+                          f"Code {self._device_code} copied"),
+                        parent=self.window(), duration=2500)
+
+    def _do_publish(self, entry, token):
+        """携带授权执行实际发布。"""
+        settings.set("github_token", token)
+        pid = entry["id"]
+        rec = plugin_manager.record(pid)
+        if rec is None or not os.path.exists(rec.path):
+            InfoBar.error(L("插件文件缺失", "Plugin file missing"),
+                          L("找不到插件源文件", "Cannot find plugin source file"),
+                          parent=self.window())
+            return
+
+        with open(rec.path, "rb") as f:
+            plugin_bytes = f.read()
+
+        self.publishBtn.setEnabled(False)
+        self.publishBtn.setText(L("发布中…", "Publishing…"))
+        self.statusLabel.setText(L("正在连接 GitHub…", "Connecting to GitHub…"))
+
+        def _work():
+            try:
+                result = self._github_publish(token, entry, plugin_bytes)
+                self.publishOk.emit(result)
+            except Exception as e:
+                self.publishFailed.emit(str(e))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _github_publish(self, token, entry, plugin_bytes):
+        """实际的 GitHub API 调用流程。
+
+        - 有写权限：直接提交到 master，立即上架，返回提交页 URL。
+        - 无写权限：Fork + 分支 + PR，返回 PR URL。
+        """
+        headers = gh_headers(token)
+        pid = entry["id"]
+        upstream = f"{_GH_API}/repos/{_REPO_OWNER}/{_REPO_NAME}"
+        username = gh_get_user(token)
+        can_push = gh_can_push(token)
+
+        # ---------- 路径 A：所有者/协作者，直接提交到 master ----------
+        if can_push:
+            self.statusUpdate.emit(L("正在检查自动上架配置…",
+                                     "Checking auto-publish setup…"))
+            try:
+                gh_ensure_workflow(token)
+            except NeedsReauth:
+                settings.set("github_token", "")
+                raise Exception(L(
+                    "授权已过期，请重新发布以完成授权。",
+                    "Authorization needs refresh. Please publish again to re-authorize."))
+
+            self.statusUpdate.emit(L("检测到仓库写权限，直接上架…",
+                                     "Write access detected, publishing directly…"))
+            plugin_b64 = base64.b64encode(plugin_bytes).decode()
+            plugin_path = f"{_MARKET_DIR}/{pid}.py"
+
+            old_sha = gh_file_sha(upstream, plugin_path, _REPO_BRANCH, headers)
+            self.statusUpdate.emit(L("正在上传插件文件…", "Uploading plugin file…"))
+            gh_put_file(upstream, plugin_path, plugin_b64,
+                        f"Publish plugin: {pid}", _REPO_BRANCH, headers, old_sha)
+
+            self.statusUpdate.emit(L("正在更新插件索引…", "Updating plugin index…"))
+            idx_path = f"{_MARKET_DIR}/plugins-index.json"
+            idx_data, idx_sha = gh_get_json_file(upstream, idx_path, _REPO_BRANCH, headers)
+            if idx_data is None:
+                idx_data, idx_sha = {"plugins": []}, None
+            plugins = [p for p in idx_data.get("plugins", []) if p.get("id") != pid]
+            plugins.append(entry)
+            idx_data["plugins"] = plugins
+            new_b64 = base64.b64encode(
+                json.dumps(idx_data, ensure_ascii=False, indent=2).encode()).decode()
+            gh_put_file(upstream, idx_path, new_b64,
+                        f"Add plugin to index: {pid}", _REPO_BRANCH, headers, idx_sha)
+            return f"https://github.com/{_REPO_OWNER}/{_REPO_NAME}/commits/{_REPO_BRANCH}"
+
+        # ---------- 路径 B：外部贡献者，Fork + PR ----------
+        self.statusUpdate.emit(
+            L(f"正在 Fork 仓库（{username}）…", f"Forking repository ({username})…"))
+
+        r = requests.post(f"{upstream}/forks", headers=headers, timeout=30)
+        if r.status_code not in (200, 202):
+            r.raise_for_status()
+        fork_api = f"{_GH_API}/repos/{r.json()['full_name']}"
+
+        import time as _t
+        for _ in range(10):
+            if requests.get(fork_api, headers=headers, timeout=10).status_code == 200:
+                break
+            _t.sleep(1)
+
+        # 同步 fork master 与上游，避免冲突
+        try:
+            requests.post(f"{fork_api}/merge-upstream", headers=headers,
+                          json={"branch": _REPO_BRANCH}, timeout=15)
+        except Exception:
+            pass
+
+        r = requests.get(f"{fork_api}/git/refs/heads/{_REPO_BRANCH}",
+                         headers=headers, timeout=10)
+        r.raise_for_status()
+        master_sha = r.json()["object"]["sha"]
+
+        branch_name = f"publish-plugin/{pid}"
+        requests.delete(f"{fork_api}/git/refs/heads/{branch_name}",
+                        headers=headers, timeout=10)
+        r = requests.post(f"{fork_api}/git/refs", headers=headers, json={
+            "ref": f"refs/heads/{branch_name}", "sha": master_sha,
+        }, timeout=10)
+        r.raise_for_status()
+
+        self.statusUpdate.emit(L("正在上传插件文件…", "Uploading plugin file…"))
+        plugin_b64 = base64.b64encode(plugin_bytes).decode()
+        gh_put_file(fork_api, f"{_MARKET_DIR}/{pid}.py", plugin_b64,
+                    f"Publish plugin: {pid}", branch_name, headers)
+
+        self.statusUpdate.emit(L("正在更新插件索引…", "Updating plugin index…"))
+        idx_path = f"{_MARKET_DIR}/plugins-index.json"
+        idx_data, idx_sha = gh_get_json_file(fork_api, idx_path, branch_name, headers)
+        if idx_data is None:
+            idx_data, idx_sha = {"plugins": []}, None
+        plugins = [p for p in idx_data.get("plugins", []) if p.get("id") != pid]
+        plugins.append(entry)
+        idx_data["plugins"] = plugins
+        new_b64 = base64.b64encode(
+            json.dumps(idx_data, ensure_ascii=False, indent=2).encode()).decode()
+        gh_put_file(fork_api, idx_path, new_b64,
+                    f"Add plugin: {pid}", branch_name, headers, idx_sha)
+
+        self.statusUpdate.emit(L("正在提交，将自动上架…", "Submitting, will go live automatically…"))
+        pr_body = (
+            f"## 新插件提交\n\n"
+            f"- **插件 ID**: {pid}\n"
+            f"- **名称**: {entry['name'][0]} / {entry['name'][1]}\n"
+            f"- **版本**: {entry['version']}\n"
+            f"- **作者**: {entry.get('author', '')}\n\n"
+            f"由 NetPulse 客户端一键发布。"
+        )
+        r = requests.post(f"{upstream}/pulls", headers=headers, json={
+            "title": f"Publish plugin: {pid}",
+            "head": f"{username}:{branch_name}",
+            "base": _REPO_BRANCH,
+            "body": pr_body,
+            "maintainer_can_modify": True,
+        }, timeout=15)
+        if r.status_code not in (200, 201):
+            raise Exception(f"PR creation failed ({r.status_code}): {r.text}")
+        return r.json()["html_url"]
+
+    def _on_publish_ok(self, url):
+        self.publishBtn.setEnabled(True)
+        self.publishBtn.setText(L("一键发布", "Publish (1-Click)"))
+        self.codePanel.hide()
+        is_direct = "/commits/" in url
+        if is_direct:
+            self.statusLabel.setText(
+                L(f"✓ 已直接上架：{url}", f"✓ Published directly: {url}"))
+            InfoBar.success(L("发布成功", "Published"),
+                            L("插件已直接上架，其他用户刷新市场即可看到。",
+                              "Plugin is now live. Other users will see it after refreshing the marketplace."),
+                            parent=self.window(), duration=6000)
+        else:
+            self.statusLabel.setText(
+                L(f"✓ 已提交，正在自动上架：{url}", f"✓ Submitted, going live automatically: {url}"))
+            InfoBar.success(L("发布成功", "Published"),
+                            L("插件已提交，将在几秒内自动上架。",
+                              "Plugin submitted. It will go live automatically within seconds."),
+                            parent=self.window(), duration=6000)
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _on_publish_err(self, msg):
+        self.publishBtn.setEnabled(True)
+        self.publishBtn.setText(L("一键发布", "Publish (1-Click)"))
+        self.codePanel.hide()
+        self.statusLabel.setText(L(f"发布失败：{msg}", f"Publish failed: {msg}"))
+        # Token 失效（被撤销/过期）：清除缓存，下次点击重新走浏览器授权
+        if "401" in msg or "Bad credentials" in msg:
+            settings.set("github_token", "")
+        InfoBar.error(L("发布失败", "Publish failed"),
+                      msg, parent=self.window(), duration=8000)

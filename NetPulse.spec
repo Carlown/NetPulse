@@ -18,7 +18,13 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # 环境里残留的大型库，与应用无关，强制排除
+        'torch', 'torchaudio', 'torchvision',
+        'scipy', 'matplotlib', 'numpy.testing',
+        'rich', 'phantom_backend',
+        'tkinter', 'unittest', 'pydoc',
+    ],
     noarchive=False,
     optimize=0,
 )
