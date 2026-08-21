@@ -3,24 +3,6 @@
   "updated": "2026-08-21",
   "plugins": [
     {
-      "id": "example_hello",
-      "name": [
-        "你好插件",
-        "Hello Plugin"
-      ],
-      "version": "1.0",
-      "author": "NetPulse",
-      "description": [
-        "入门示例：演示插件 API 最小用法（插件页面、私有配置持久化）",
-        "Starter example: minimal plugin API usage (plugin page, persisted settings)"
-      ],
-      "file": "example_hello.py",
-      "sha256": "e5acd2c5a2dcf2df07c7726c98a56f5cbeca2fd2baa787522774383fcdb50c9f",
-      "min_app": "1.0.7",
-      "homepage": "https://github.com/Carlown/NetPulse",
-      "icon": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPojvkGAANTAd5l+BR8AAAAAElFTkSuQmCC"
-    },
-    {
       "id": "random_target",
       "name": [
         "随机目标生成器",
