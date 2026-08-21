@@ -142,8 +142,27 @@ class StressEngine(QObject):
 
     # ---------- 内部 ----------
 
+    @staticmethod
+    def _lookup_plugin_protocol(proto: str):
+        """查询插件注册的自定义协议 handler；延迟导入避免循环依赖。"""
+        try:
+            from app.services.plugins import plugin_manager
+            return plugin_manager.protocol_handler(proto)
+        except Exception:
+            return None
+
     def _worker(self, c, bucket):
         proto = c["protocol"]
+        # 插件协议：worker 启动时查一次 handler（局部变量，各线程独立）
+        plugin_handler = None
+        if proto not in ("HTTP", "HTTPS", "TCP", "UDP", "ICMP"):
+            plugin_handler = self._lookup_plugin_protocol(proto)
+            if plugin_handler is None:
+                # 协议未注册（插件被删）：本 worker 全部计为失败并快速退出
+                with self._lock:
+                    self.fail += 1
+                    self.errors["unknown_protocol"] = self.errors.get("unknown_protocol", 0) + 1
+                return
         session = None
         if proto in ("HTTP", "HTTPS"):
             session = requests.Session()
@@ -194,6 +213,13 @@ class StressEngine(QObject):
                 elif proto == "ICMP":
                     ok, err = self._icmp_once(c, timeout)
                     nbytes = 64 if ok else 0
+                else:
+                    # 插件自定义协议：handler 在 worker 线程执行，异常归为失败
+                    if plugin_handler is None:
+                        raise RuntimeError(f"unknown protocol: {proto}")
+                    ok, err, nbytes = plugin_handler(c, timeout, st)
+                    ok = bool(ok)
+                    nbytes = int(nbytes or 0)
             except requests.exceptions.Timeout:
                 err = "timeout"
             except requests.exceptions.ConnectionError as e:
@@ -375,6 +401,12 @@ class MultiStressEngine(QObject):
             configs = [configs]
         if self.running or not configs:
             return False
+        # 插件生命周期：压测开始
+        try:
+            from app.services.plugins import plugin_manager
+            plugin_manager.notify_test_start(configs)
+        except Exception:
+            pass
         self._children = []
         self._snaps = {}
         self._reports = {}
@@ -426,6 +458,11 @@ class MultiStressEngine(QObject):
     def _emit_aggregate(self):
         if not self._snaps:
             return
+        # 插件指标订阅转发（主线程）
+        try:
+            from app.services.plugins import plugin_manager
+        except Exception:
+            plugin_manager = None
         snaps = [self._snaps[i] for i in sorted(self._snaps)]
         targets = []
         last_err = ""
@@ -453,6 +490,11 @@ class MultiStressEngine(QObject):
             "targets": targets,
         }
         self.snapshot.emit(agg)
+        if plugin_manager is not None:
+            try:
+                plugin_manager.dispatch_metrics(agg)
+            except Exception:
+                pass
 
     def _finish(self):
         self._timer.stop()
@@ -495,6 +537,12 @@ class MultiStressEngine(QObject):
             } for r in rs],
         }
         self.report_ready.emit(report)
+        # 插件生命周期：压测结束
+        try:
+            from app.services.plugins import plugin_manager
+            plugin_manager.notify_test_end(report)
+        except Exception:
+            pass
 
 
 engine = MultiStressEngine()

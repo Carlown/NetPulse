@@ -100,7 +100,13 @@ class StressView(ScrollArea):
         self.reportCard = SimpleCardWidget(self.view)
         rl = QVBoxLayout(self.reportCard)
         rl.setContentsMargins(20, 16, 20, 14)
-        rl.addWidget(StrongBodyLabel(L("汇总报告", "Summary Report"), self.reportCard))
+        rep_head = QHBoxLayout()
+        rep_head.addWidget(StrongBodyLabel(L("汇总报告", "Summary Report"), self.reportCard))
+        rep_head.addStretch(1)
+        self.exportReportBtn = PushButton(L("导出报告", "Export Report"), self.reportCard)
+        self.exportReportBtn.clicked.connect(self._export_report)
+        rep_head.addWidget(self.exportReportBtn)
+        rl.addLayout(rep_head)
         self.reportLabel = BodyLabel(L("尚未执行测试。", "No test executed yet."), self.reportCard)
         self.reportLabel.setWordWrap(True)
         rl.addWidget(self.reportLabel)
@@ -117,7 +123,12 @@ class StressView(ScrollArea):
         self._startup_busy = False   # 是否正在显示启动等待遮罩
         self._startup_configs = None # 延迟启动时暂存配置
         self._num_targets = 1
+        self._last_report = None
         self._restore_form()
+        # 插件扩展：协议下拉/目标按钮跟随插件启停动态刷新
+        from app.services.plugins import plugin_manager
+        plugin_manager.changed.connect(self._refresh_plugin_protocols)
+        self._refresh_plugin_protocols()
 
     def _restore_form(self):
         """启动时恢复上次填写的目标配置（本地持久化）。"""
@@ -341,6 +352,16 @@ class StressView(ScrollArea):
         prow.addWidget(self._wrap(BodyLabel(L("端口", "Port"), card), self.portSpin))
         prow.addWidget(self._wrap(BodyLabel(L("协议", "Protocol"), card), self.protoCombo))
         lay.addLayout(prow)
+
+        # 插件目标按钮（有插件注册目标集提供者时才显示）
+        self.pluginTargetsBtn = PushButton(L("插件目标", "Plugin Targets"), card)
+        self.pluginTargetsBtn.clicked.connect(self._pick_plugin_targets)
+        self.pluginTargetsBtn.hide()
+        pt_row = QHBoxLayout()
+        pt_row.setContentsMargins(0, 0, 0, 0)
+        pt_row.addWidget(self.pluginTargetsBtn)
+        pt_row.addStretch(1)
+        lay.addLayout(pt_row)
 
         lay.addWidget(BodyLabel(L("并发线程数（每目标）", "Concurrency Threads (per target)"), card))
         thread_row = QHBoxLayout()
@@ -783,8 +804,129 @@ class StressView(ScrollArea):
             breakdown = sep.join(f"{err_text(k)} {times}{v}" for k, v in top)
             text += "\n" + L(f"失败原因分布：{breakdown}", f"Failure reasons: {breakdown}")
         self.reportLabel.setText(text)
+        self._last_report = r  # 供导出
         log.info(L(f"压测完成: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}",
                    f"Stress test finished: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}"))
+
+    # ---------- 插件扩展入口 ----------
+    def _refresh_plugin_protocols(self):
+        """把插件注册的自定义协议加进协议下拉框（保留内置与当前选中）。"""
+        from app.services.plugins import plugin_manager
+        builtin = {"HTTP", "HTTPS", "TCP", "UDP", "ICMP"}
+        cur = self.protoCombo.currentText()
+        items = [self.protoCombo.itemText(i) for i in range(self.protoCombo.count())]
+        # 移除已下线的插件协议
+        for it in items:
+            if it not in builtin and it not in plugin_manager.protocol_names():
+                idx = self.protoCombo.findText(it)
+                if idx >= 0:
+                    self.protoCombo.removeItem(idx)
+        # 加入新注册的插件协议
+        for name in plugin_manager.protocol_names():
+            if name not in builtin and self.protoCombo.findText(name) < 0:
+                self.protoCombo.addItem(name)
+        # 尽量恢复原选中项
+        idx = self.protoCombo.findText(cur)
+        if idx >= 0:
+            self.protoCombo.setCurrentIndex(idx)
+        # 插件目标提供者按钮可见性
+        self.pluginTargetsBtn.setVisible(bool(plugin_manager.target_providers()))
+
+    def _pick_plugin_targets(self):
+        """弹出插件目标集提供者菜单，选择后把目标追加进编辑框。"""
+        from qfluentwidgets import RoundMenu, Action
+        from qfluentwidgets import FluentIcon as FIF
+        from app.services.plugins import plugin_manager
+        providers = plugin_manager.target_providers()
+        if not providers:
+            return
+        menu = RoundMenu(parent=self)
+        for label, fn in providers:
+            menu.addAction(Action(FIF.LIBRARY, label,
+                                  triggered=lambda _=False, fn=fn: self._apply_plugin_targets(fn)))
+        menu.exec(self.pluginTargetsBtn.mapToGlobal(self.pluginTargetsBtn.rect().bottomLeft()),
+                  aniType="drop")
+
+    def _apply_plugin_targets(self, fn):
+        """调用提供者回调，把返回的目标列表追加到目标编辑框。"""
+        try:
+            targets = fn() or []
+        except Exception as e:
+            InfoBar.error(L("插件目标获取失败", "Plugin target fetch failed"),
+                          str(e), parent=self.window(), duration=5000)
+            return
+        targets = [str(t).strip() for t in targets if str(t).strip()]
+        if not targets:
+            InfoBar.warning(L("无目标", "No targets"),
+                            L("该插件未返回任何目标", "The plugin returned no targets"),
+                            parent=self.window())
+            return
+        cur = self.targetEdit.toPlainText().strip()
+        merged = (cur + "\n" if cur else "") + "\n".join(targets)
+        # 去重保序
+        seen, lines = set(), []
+        for ln in merged.splitlines():
+            ln = ln.strip()
+            if ln and ln not in seen:
+                seen.add(ln)
+                lines.append(ln)
+        self.targetEdit.setPlainText("\n".join(lines))
+        InfoBar.success(L("已导入目标", "Targets imported"),
+                        L(f"来自插件：共 {len(targets)} 个", f"From plugin: {len(targets)} item(s)"),
+                        parent=self.window())
+
+    def _export_report(self):
+        """导出汇总报告：内置 JSON + 插件注册的导出格式。"""
+        r = getattr(self, "_last_report", None)
+        if not r:
+            InfoBar.warning(L("暂无报告", "No report"),
+                            L("请先执行一次压测", "Run a stress test first"), parent=self.window())
+            return
+        from app.services.plugins import plugin_manager
+        exporters = plugin_manager.exporters()
+        if not exporters:
+            self._do_export_report_json(r)
+            return
+        # 有插件导出器：弹菜单选择格式
+        from qfluentwidgets import RoundMenu, Action
+        from qfluentwidgets import FluentIcon as FIF
+        menu = RoundMenu(L("选择导出格式", "Choose format"), parent=self)
+        menu.addAction(Action(FIF.SAVE, "JSON",
+                              triggered=lambda _=False: self._do_export_report_json(r)))
+        menu.addSeparator()
+        for label, fn in exporters:
+            menu.addAction(Action(FIF.IOT, label,
+                                  triggered=lambda _=False, fn=fn, lb=label:
+                                  self._do_export_report_plugin(r, fn, lb)))
+        menu.exec(self.exportReportBtn.mapToGlobal(self.exportReportBtn.rect().bottomLeft()),
+                  aniType="drop")
+
+    def _do_export_report_json(self, r):
+        path, _ = QFileDialog.getSaveFileName(self, L("导出报告", "Export report"),
+                                              "netpulse-report.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(r, f, ensure_ascii=False, indent=2)
+            InfoBar.success(L("导出成功", "Exported"), path, parent=self.window())
+            log.info(L(f"报告已导出: {path}", f"Report exported: {path}"))
+        except Exception as e:
+            InfoBar.error(L("导出失败", "Export failed"), str(e), parent=self.window())
+
+    def _do_export_report_plugin(self, r, fn, label):
+        path, _ = QFileDialog.getSaveFileName(self, L("导出报告", "Export report"),
+                                              "netpulse-report", L("所有文件 (*.*)", "All files (*.*)"))
+        if not path:
+            return
+        try:
+            fn(r, path)
+            InfoBar.success(L("导出成功", "Exported"),
+                            L(f"{label} → {path}", f"{label} → {path}"), parent=self.window())
+            log.info(L(f"报告已导出({label}): {path}", f"Report exported ({label}): {path}"))
+        except Exception as e:
+            InfoBar.error(L("导出失败", "Export failed"), str(e),
+                          parent=self.window(), duration=6000)
 
     def fill_defaults(self, target="", port=80, protocol="HTTP"):
         """快速开始入口。"""

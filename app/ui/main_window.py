@@ -18,6 +18,7 @@ from app.ui.settings_view import SettingsView
 from app.ui.stress_view import StressView
 
 MON_ICON = getattr(FIF, "DIAGNOSTICS", getattr(FIF, "HEART", FIF.DEVELOPER_TOOLS))
+PLUGIN_ICON = getattr(FIF, "APPLICATION", FIF.DEVELOPER_TOOLS)
 
 
 def _get_icon_path():
@@ -46,6 +47,7 @@ class MainWindow(FluentWindow):
         self.init_navigation()
         self.init_window()
         self._init_tray()
+        self._init_plugins()
 
         # BusyOverlay 创建为子控件，但初始隐藏
         # 使用 QTimer.singleShot 确保在窗口完全构建后再创建
@@ -72,6 +74,52 @@ class MainWindow(FluentWindow):
             self._busy_overlay.setGeometry(0, 0, self.width(), self.height())
             self._busy_overlay.hide()
         return self._busy_overlay
+
+    def _init_plugins(self):
+        """加载插件并监听后续启停（设置页可动态启停/导入）。"""
+        from app.services.plugins import plugin_manager
+        self._plugin_pages = {}  # pid -> 页面控件
+        plugin_manager.loaded.connect(self._on_plugin_loaded)
+        plugin_manager.unloaded.connect(self._on_plugin_unloaded)
+        plugin_manager.load_all()
+
+    def _on_plugin_loaded(self, plugin):
+        """插件加载成功：创建其页面并加入导航。"""
+        try:
+            widget = plugin.create_widget(self)
+        except Exception as e:
+            from app.services.logger import log
+            log.error(L(f"插件页面创建失败：{plugin.id} — {e}",
+                        f"Plugin page creation failed: {plugin.id} — {e}"))
+            return
+        if widget is None:
+            return
+        pid = plugin.id
+        widget.setObjectName(f"plugin_{pid}")
+        self._plugin_pages[pid] = widget
+        try:
+            self.addSubInterface(widget, PLUGIN_ICON, plugin.page_title())
+        except Exception as e:
+            from app.services.logger import log
+            log.error(L(f"插件页面注册失败：{pid} — {e}",
+                        f"Plugin page registration failed: {pid} — {e}"))
+            self._plugin_pages.pop(pid, None)
+
+    def _on_plugin_unloaded(self, pid: str):
+        """插件卸载：从导航与堆栈窗口移除其页面。"""
+        widget = self._plugin_pages.pop(pid, None)
+        if widget is None:
+            return
+        route_key = widget.objectName()
+        try:
+            self.navigationInterface.removeWidget(route_key)
+        except Exception:
+            pass
+        try:
+            self.stackedWidget.removeWidget(widget)
+        except Exception:
+            pass
+        widget.deleteLater()
 
     def _init_tray(self):
         """初始化系统托盘。"""

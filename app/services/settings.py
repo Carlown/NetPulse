@@ -22,6 +22,8 @@ class AppSettings:
         "tray_notified": False,       # 托盘最小化提示是否已弹过（永久只提示一次）
         "auto_check_updates": True,   # 启动时自动检查更新
         "skip_version": "",           # 跳过的版本号（不再提示该版本）
+        "plugins_disabled": [],       # 已禁用插件 ID 列表
+        "plugin_data": {},            # 插件私有配置 {pid: {key: value}}
     }
 
     def __init__(self):
