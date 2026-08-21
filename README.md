@@ -51,7 +51,7 @@ Check the built-in `example_hello.py` / `example_dns.py` plugins in the plugin f
 
 ### Install (End Users)
 
-1. Go to the [**Releases**](https://github.com/Carlown/NetPulse/releases/tag/v1.0.0) page
+1. Go to the [**Releases**](https://github.com/Carlown/NetPulse/releases/latest) page
 2. Download the latest `NetPulse-Setup-x.x.x.exe`
 3. Run the installer and follow the wizard (desktop shortcut optional)
 4. Launch from the Start menu or desktop
@@ -131,7 +131,7 @@ NetPulse v1.1.0 内置完整插件平台，可以自由扩展功能：
 
 ### 安装（普通用户）
 
-1. 进入 [**Releases**](https://github.com/Carlown/NetPulse/releases/tag/v1.0.0) 发布页
+1. 进入 [**Releases**](https://github.com/Carlown/NetPulse/releases/latest) 发布页
 2. 下载最新的 `NetPulse-Setup-x.x.x.exe`
 3. 双击运行，按向导完成安装（可勾选桌面快捷方式）
 4. 安装后从开始菜单或桌面启动
