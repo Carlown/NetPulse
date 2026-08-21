@@ -23,6 +23,7 @@ NetPulse is a Windows desktop application for network stress testing and perform
 | 📊 **Dashboard** | Real-time CPU / memory / network cards and trend charts |
 | 🔥 **Stress Test** | HTTP / HTTPS / TCP / UDP / ICMP protocols; live QPS, latency percentiles (P50/P90/P99), **total sent traffic** (auto-scaled B/KB/MB/GB/TB), classified failure reasons |
 | 🤝 **Collaborative Test** | Host / node modes, one-click invite code copy, IPv4+IPv6 dual-stack listening, UPnP automatic port mapping (Internet collaboration supported) |
+| 🧩 **Plugin System** | Full plugin platform: local plugin management (enable/disable/reload), **built-in plugin marketplace**, one-click install & update, custom icons, and **one-click publish/unpublish to GitHub** — no manual token required |
 | 📈 **Monitoring** | Real-time CPU / memory / network speed curves, smooth wheel zoom, double-click to resume live scrolling |
 | ⚙️ **Settings** | Dark / light theme, instant Chinese-English switching, default parameters, audit log export |
 
@@ -33,6 +34,20 @@ NetPulse is a Windows desktop application for network stress testing and perform
 - **High-rate double confirmation**: re-confirmation dialog above 500 QPS
 - **Token-bucket rate limiting**: shared across threads, never exceeds the configured rate
 - **Audit log**: start / stop / authorization events persisted to disk
+
+### Plugin System (New in v1.1.0)
+
+NetPulse v1.1.0 ships with a full plugin platform — extend the app with your own features:
+
+- **Plugin Marketplace**: browse, search, install and update community plugins with one click (integrity-verified via SHA-256)
+- **Local Plugin Management**: enable / disable / reload / remove plugins instantly; metadata and icons stay visible when disabled
+- **One-click Publish**: publish your own plugins to the marketplace directly from the app via GitHub OAuth device flow — no manual token generation. Publishes go live automatically (auto-merge workflow, no manual review)
+- **One-click Unpublish**: plugin authors can remove their own listings at any time
+- **Custom Icons**: plugin authors can upload a PNG/JPG icon (also supports built-in Fluent icons); auto-generated colored initial badge as fallback
+- **Rich Plugin API**: register custom protocols, exporters, target providers and metrics subscriptions; respond to test lifecycle events
+- **Sandboxed loading**: plugin crashes never take down the host app
+
+Check the built-in `example_hello.py` / `example_dns.py` plugins in the plugin folder for API usage examples.
 
 ### Install (End Users)
 
@@ -88,6 +103,7 @@ NetPulse 是一款 Windows 桌面端的网络压力测试与性能监控工具�
 | 📊 **仪表盘** | CPU / 内存 / 网络实时监控卡片与趋势图 |
 | 🔥 **压力测试** | HTTP / HTTPS / TCP / UDP / ICMP 五种协议，实时 QPS、延迟分位数（P50/P90/P99）、**总发送流量统计**（自动换算 B/KB/MB/GB/TB）、失败原因分类统计 |
 | 🤝 **协同测试** | 主控邀请 / 节点加入模式，邀请码一键复制，IPv4+IPv6 双栈监听，UPnP 自动端口映射（支持外网协同） |
+| 🧩 **插件系统** | 完整插件平台：本地插件管理（启用/禁用/重载）、**内置插件市场**、一键安装与更新、自定义图标、**一键发布/下架到 GitHub** —— 无需手动生成令牌 |
 | 📈 **性能监控** | CPU / 内存 / 网速实时曲线，鼠标滚轮平滑缩放，双击恢复实时滚动 |
 | ⚙️ **设置** | 深色 / 浅色主题，中英双语即时切换，默认参数配置，审计日志导出 |
 
@@ -98,6 +114,20 @@ NetPulse 是一款 Windows 桌面端的网络压力测试与性能监控工具�
 - **高速率二次确认**：速率超过 500 QPS 时弹出再次确认
 - **令牌桶限速**：多线程共享令牌桶，严格不超设定速率
 - **审计日志**：开始 / 停止 / 授权等关键操作全部落盘
+
+### 插件系统（v1.1.0 新增）
+
+NetPulse v1.1.0 内置完整插件平台，可以自由扩展功能：
+
+- **插件市场**：浏览、搜索、一键安装和更新社区插件（SHA-256 完整性校验）
+- **本地插件管理**：即时启用 / 禁用 / 重载 / 删除插件；禁用后图标和元数据保持显示
+- **一键发布**：通过 GitHub OAuth 设备授权，直接在软件内把你的插件发布到市场 —— 无需手动生成令牌，发布后自动上架（自动合并工作流，无需人工审核）
+- **一键下架**：插件作者可随时下架自己发布的插件
+- **自定义图标**：发布时可上传 PNG/JPG 图标（也支持内置 Fluent 图标）；未上传时自动生成彩色首字徽章
+- **丰富的插件 API**：注册自定义协议、导出器、目标源和指标订阅；响应测试生命周期事件
+- **沙箱加载**：插件崩溃不会拖垮主程序
+
+插件目录内置 `example_hello.py` / `example_dns.py` 示例插件，可参考其 API 用法。
 
 ### 安装（普通用户）
 

@@ -30,6 +30,53 @@ INDEX_SOURCES = [
 # 索引在线编辑入口（发布插件用）
 INDEX_EDIT_URL = "https://github.com/Carlown/NetPulse/edit/master/marketplace/plugins-index.json"
 
+# 浏览器一键授权（Device Flow）用的 OAuth App Client ID。
+# 项目维护者在 GitHub → Settings → Developer settings → OAuth Apps 注册一次，
+# 把 Client ID 填到这里即可；发布插件的用户将全程无需手动管理 Token。
+GITHUB_OAUTH_CLIENT_ID = "Ov23licX0P0zdKXS36yC"
+
+_GH_LOGIN = "https://github.com/login"
+
+
+def device_flow_start() -> dict:
+    """启动 GitHub 设备授权：返回 device_code/user_code/verification_uri 等。"""
+    if not GITHUB_OAUTH_CLIENT_ID:
+        raise ValueError("OAuth client id not configured")
+    r = requests.post(f"{_GH_LOGIN}/device/code",
+                      headers={"Accept": "application/json"},
+                      data={"client_id": GITHUB_OAUTH_CLIENT_ID,
+              "scope": "public_repo workflow"},
+                      timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def device_flow_poll(device_code: str, interval: int, expires_in: int) -> str:
+    """轮询授权结果直到用户在浏览器确认，返回 access_token；拒绝/超时抛异常。"""
+    import time as _t
+    deadline = _t.time() + int(expires_in or 900)
+    iv = max(int(interval or 5), 1)
+    while _t.time() < deadline:
+        r = requests.post(f"{_GH_LOGIN}/oauth/access_token",
+                          headers={"Accept": "application/json"},
+                          data={"client_id": GITHUB_OAUTH_CLIENT_ID,
+                                "device_code": device_code,
+                                "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
+                          timeout=15)
+        d = r.json()
+        err = d.get("error")
+        if err == "authorization_pending":
+            _t.sleep(iv)
+            continue
+        if err == "slow_down":
+            iv += 5
+            _t.sleep(iv)
+            continue
+        if err:
+            raise ValueError(err)
+        return d["access_token"]
+    raise ValueError("authorization timeout")
+
 _TIMEOUT = 10
 _CACHE_WINDOW = 300  # 秒：raw 源加 ?t= 参数穿透 CDN 缓存，5 分钟一档
 
@@ -162,11 +209,22 @@ class MarketClient(QObject):
     # ---------- 版本状态 ----------
     @staticmethod
     def installed_state(entry: dict) -> str:
-        """对比本地已装插件版本：'absent' | 'same' | 'update'。"""
+        """对比本地已装插件版本：'absent' | 'same' | 'update' | 'disabled'。"""
         from app.services.plugins import plugin_manager
         rec = plugin_manager.record(entry.get("id", ""))
-        if rec is None or rec.plugin is None:
+        if rec is None:
             return "absent"
+        # 已安装但被禁用：显示"启用"而非"安装"
+        if rec.disabled:
+            return "disabled"
+        # 已安装但未加载（非禁用）：用缓存的版本号比较
+        if rec.plugin is None:
+            try:
+                local_v = _ver_tuple(str(rec.display_version or "0"))
+                remote_v = _ver_tuple(str(entry.get("version", "0")))
+                return "same" if local_v >= remote_v else "update"
+            except Exception:
+                return "same"
         try:
             local_v = _ver_tuple(str(getattr(rec.plugin, "version", "0")))
             remote_v = _ver_tuple(str(entry.get("version", "0")))
