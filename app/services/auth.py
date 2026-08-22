@@ -1,7 +1,9 @@
 """目标授权管理：压测目标必须先通过授权确认。"""
+import ipaddress
 import re
 import time
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 from app.services.logger import log
 from app.services.settings import settings
@@ -9,12 +11,63 @@ from app.ui.i18n import L
 
 
 def normalize_host(target: str) -> str:
-    """提取主机名：去掉协议、路径、端口。"""
+    """提取规范化主机名，支持 URL、域名端口和 IPv4/IPv6。"""
     t = (target or "").strip()
-    t = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", t)
-    t = t.split("/")[0]
-    t = t.split(":")[0]
-    return t.lower().strip()
+    if not t:
+        return ""
+
+    has_scheme = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", t))
+    if not has_scheme:
+        authority = re.split(r"[/\?#]", t, maxsplit=1)[0].strip()
+        # 裸 IPv6（如 ::1 / 2001:db8::1）没有方括号，urlsplit 会把它
+        # 误判为 host:port；先按 IP 地址直接解析。
+        if authority and not authority.startswith("[") and authority.count(":") >= 2:
+            try:
+                return str(ipaddress.ip_address(authority)).lower()
+            except ValueError:
+                return ""
+
+    try:
+        parsed = urlsplit(t if has_scheme else f"//{t}")
+        host = parsed.hostname or ""
+        # 访问 port 属性会校验非法端口（如 example.com:abc / :70000）。
+        # 只取 hostname 会把这类输入误判成有效目标。
+        _ = parsed.port
+    except ValueError:
+        return ""
+    return host.rstrip(".").lower().strip()
+
+
+def build_http_url(target: str, host: str, port: int, protocol: str) -> str:
+    """构造压测 URL；保留路径/查询和显式端口，裸 IPv6 自动加方括号。"""
+    raw = (target or "").strip()
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw):
+        return raw
+    scheme = "https" if str(protocol).upper() == "HTTPS" else "http"
+    default_port = 443 if scheme == "https" else 80
+
+    # 裸 IPv6 不能直接交给 urlsplit("//...") 判断端口；先单独识别，
+    # 同时保留其后的 path/query/fragment。
+    match = re.match(r"^([^/?#]*)(.*)$", raw)
+    raw_authority, tail = match.groups() if match else (raw, "")
+    if raw_authority and not raw_authority.startswith("[") \
+            and raw_authority.count(":") >= 2:
+        try:
+            ipv6 = str(ipaddress.ip_address(raw_authority))
+            suffix = f":{int(port)}" if int(port) != default_port else ""
+            return f"{scheme}://[{ipv6}]{suffix}{tail}"
+        except ValueError:
+            pass
+
+    parsed = urlsplit(f"//{raw}")
+    explicit_port = parsed.port  # normalize_host 已校验；这里保留显式端口
+    if explicit_port is not None:
+        authority = parsed.netloc
+    else:
+        authority = f"[{host}]" if ":" in host else host
+        if int(port) != default_port:
+            authority += f":{int(port)}"
+    return urlunsplit((scheme, authority, parsed.path, parsed.query, parsed.fragment))
 
 
 def is_authorized(host: str) -> bool:
@@ -26,22 +79,34 @@ def add_authorized(host: str, note: str = ""):
         return
     if is_authorized(host):
         return
-    settings.authorized.append({"id": uuid.uuid4().hex[:8], "host": host,
-                                "note": note, "ts": time.time()})
-    settings.save()
+    items = list(settings.authorized)
+    items.append({"id": uuid.uuid4().hex[:8], "host": host,
+                  "note": note, "ts": time.time()})
+    if not settings.set("authorized", items):
+        log.error(L(f"授权目标保存失败: {host}", f"Failed to save authorized target: {host}"))
+        return False
     log.info(L(f"新增授权目标: {host}", f"Target authorized: {host}"))
+    return True
 
 
 def remove_authorized(host: str):
-    settings.authorized = [a for a in settings.authorized if a.get("host") != host]
-    settings.save()
+    items = [a for a in settings.authorized if a.get("host") != host]
+    if not settings.set("authorized", items):
+        log.error(L(f"授权目标移除保存失败: {host}",
+                    f"Failed to persist target authorization removal: {host}"))
+        return False
     log.info(L(f"移除授权目标: {host}", f"Target authorization removed: {host}"))
+    return True
 
 
 def is_private_target(host: str) -> bool:
     """本机/内网地址视为低风险目标。"""
-    return (host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
-            or host.startswith("192.168.") or host.startswith("10.")
-            or host.startswith("172.16.") or host.startswith("172.17.")
-            or host.startswith("172.18.") or host.startswith("172.19.")
-            or host.endswith(".local") or host.endswith(".lan"))
+    host = normalize_host(host)
+    if host == "localhost" or host.endswith(".local") or host.endswith(".lan"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_unspecified)
+    except ValueError:
+        return False

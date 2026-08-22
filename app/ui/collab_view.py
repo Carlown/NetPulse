@@ -11,7 +11,8 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             PushButton, ScrollArea, SimpleCardWidget, SpinBox,
                             StrongBodyLabel, SubtitleLabel, SwitchButton)
 
-from app.services.auth import add_authorized, is_authorized, normalize_host
+from app.services.auth import (add_authorized, build_http_url, is_authorized,
+                               normalize_host)
 from app.services.collab import collab_client, collab_server, PORT
 from app.services.logger import log
 from app.services.settings import settings
@@ -199,7 +200,16 @@ class CollabView(ScrollArea):
         log_card = SimpleCardWidget(self.view)
         lcl = QVBoxLayout(log_card)
         lcl.setContentsMargins(20, 16, 20, 14)
-        lcl.addWidget(StrongBodyLabel(L("协同日志", "Collab Log"), log_card))
+        log_head = QHBoxLayout()
+        log_head.addWidget(StrongBodyLabel(L("协同日志", "Collab Log"), log_card))
+        log_head.addStretch(1)
+        self.copyLogBtn = PushButton(L("复制日志", "Copy Log"), log_card)
+        self.copyLogBtn.clicked.connect(self._copy_log)
+        self.clearLogBtn = PushButton(L("清空", "Clear"), log_card)
+        self.clearLogBtn.clicked.connect(self._clear_log)
+        log_head.addWidget(self.copyLogBtn)
+        log_head.addWidget(self.clearLogBtn)
+        lcl.addLayout(log_head)
         self.logLabel = CaptionLabel(L("（暂无）", "(empty)"), log_card)
         self.logLabel.setWordWrap(True)
         lcl.addWidget(self.logLabel)
@@ -470,6 +480,14 @@ class CollabView(ScrollArea):
         InfoBar.success(L("已复制", "Copied"), addr, parent=self.window())
 
     def _push_start(self):
+        nodes = collab_server.get_nodes()
+        if not nodes:
+            InfoBar.warning(
+                L("暂无在线节点", "No Online Nodes"),
+                L("请等待至少一个节点加入后再广播开始指令。",
+                  "Wait for at least one node to join before broadcasting a start command."),
+                parent=self.window())
+            return
         stress = self.window().stress
         target_raw = stress.targetEdit.toPlainText().strip().splitlines()[0].strip()
         host = normalize_host(target_raw)
@@ -486,13 +504,19 @@ class CollabView(ScrollArea):
                                 L(f"目标 {host} 未授权，测试已阻止", f"Target {host} not authorized; test blocked"),
                                 parent=self.window())
                 return
-            add_authorized(host, dlg.note())
+            if not add_authorized(host, dlg.note()):
+                InfoBar.error(
+                    L("授权保存失败", "Authorization Save Failed"),
+                    L(f"无法保存目标 {host} 的授权记录：{settings.last_error}",
+                      f"Could not save authorization for {host}: {settings.last_error}"),
+                    parent=self.window())
+                return
             stress.refresh_auth_list()
         # 高速率二次确认：与本地压测一致（>500 QPS时提醒），并按在线节点数计算合计压力
         rate = stress.rateSpin.value()
         if rate > HIGH_RATE:
             from qfluentwidgets import MessageBox
-            n = len(collab_server.get_nodes())
+            n = len(nodes)
             w = MessageBox(L("高请求速率二次确认", "High Rate Confirmation"),
                            L(f"协同测试将广播开始：每个节点速率上限 {rate} QPS，"
                              f"当前在线 {n} 个节点（合计约 {rate * n} QPS 同时压向同一目标）。\n"
@@ -515,6 +539,13 @@ class CollabView(ScrollArea):
                             L("请求头须为合法 JSON", "Headers must be valid JSON"),
                             parent=self.window())
             return
+        if not isinstance(headers, dict):
+            InfoBar.warning(
+                L("请求头格式错误", "Invalid headers"),
+                L("请求头必须是 JSON 对象，例如 {\"User-Agent\": \"NetPulse\"}",
+                  "Headers must be a JSON object, for example {\"User-Agent\": \"NetPulse\"}"),
+                parent=self.window())
+            return
         config = {
             "target": host,
             "port": stress.portSpin.value(),
@@ -528,12 +559,8 @@ class CollabView(ScrollArea):
             "headers": headers,
         }
         if config["protocol"] in ("HTTP", "HTTPS"):
-            # 与本地压测一致：裸主机名 + 非默认端口时，把端口拼进URL（否则节点会测默认端口）
-            url = target_raw if target_raw.startswith("http") else f"{config['protocol'].lower()}://{host}"
-            default_port = 443 if config["protocol"] == "HTTPS" else 80
-            if config["port"] != default_port and not target_raw.startswith("http"):
-                url += f":{config['port']}"
-            config["url"] = url
+            config["url"] = build_http_url(
+                target_raw, host, config["port"], config["protocol"])
         collab_server.broadcast({"type": "start", "config": config})
         self._server_log(L(f"已广播开始: {config['protocol']}://{host}:{config['port']}",
                            f"Start broadcast: {config['protocol']}://{host}:{config['port']}"))
@@ -602,6 +629,18 @@ class CollabView(ScrollArea):
     def _on_remote_start(self, config):
         """收到主控开始指令：主控已完成目标授权，节点端直接填充配置并启动。"""
         stress = self.window().stress
+        try:
+            config = self._validate_remote_config(config, stress)
+        except (TypeError, ValueError) as e:
+            reason = str(e) or L("配置格式错误", "Malformed configuration")
+            self._client_log(L(f"已拒绝无效的主控配置：{reason}",
+                               f"Rejected invalid host configuration: {reason}"))
+            log.warning(L(f"拒绝无效协同启动配置：{reason}",
+                          f"Rejected invalid collab start configuration: {reason}"))
+            InfoBar.warning(
+                L("启动指令无效", "Invalid Start Command"), reason,
+                parent=self.window())
+            return
         self._client_log(L("收到主控指令，开始压测", "Received host command; starting"))
         target = config.get("url") or config.get("target", "")
         if target:
@@ -647,6 +686,68 @@ class CollabView(ScrollArea):
         # 延迟80ms再启动引擎，确保遮罩先渲染
         self._remote_start_config = config
         QTimer.singleShot(80, self._do_remote_start)
+
+    @staticmethod
+    def _validate_remote_config(config, stress):
+        """校验网络收到的启动配置，并返回只含安全范围参数的新字典。"""
+        if not isinstance(config, dict):
+            raise TypeError(L("主控配置必须是对象", "Host configuration must be an object"))
+
+        def bounded_int(name, default, minimum, maximum):
+            value = config.get(name, default)
+            if isinstance(value, bool):
+                raise ValueError(L(f"参数 {name} 不是有效整数",
+                                   f"Parameter {name} is not a valid integer"))
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(L(f"参数 {name} 不是有效整数",
+                                   f"Parameter {name} is not a valid integer")) from None
+            if not minimum <= value <= maximum:
+                raise ValueError(L(f"参数 {name} 超出允许范围 {minimum}–{maximum}",
+                                   f"Parameter {name} is outside the allowed range {minimum}–{maximum}"))
+            return value
+
+        proto = str(config.get("protocol", "HTTP")).strip().upper()
+        if not proto or stress.protoCombo.findText(proto) < 0:
+            raise ValueError(L(f"节点不支持协议：{proto or '-'}",
+                               f"Protocol is not available on this node: {proto or '-'}"))
+
+        raw_target = config.get("url") or config.get("target") or ""
+        if not isinstance(raw_target, str) or not raw_target.strip():
+            raise ValueError(L("缺少目标地址", "Target address is missing"))
+        raw_target = raw_target.strip()
+        if len(raw_target) > 2048:
+            raise ValueError(L("目标地址过长", "Target address is too long"))
+        host = normalize_host(raw_target)
+        if not host:
+            raise ValueError(L("目标地址无效", "Target address is invalid"))
+
+        headers = config.get("headers", {})
+        if headers is None:
+            headers = {}
+        if not isinstance(headers, dict):
+            raise ValueError(L("请求头必须是 JSON 对象", "Headers must be a JSON object"))
+        if len(headers) > 100 or len(json.dumps(headers, ensure_ascii=False)) > 65536:
+            raise ValueError(L("请求头数量或大小超出限制", "Headers exceed the count or size limit"))
+
+        port = bounded_int("port", 80, 1, 65535)
+        safe = {
+            "target": host,
+            "port": port,
+            "protocol": proto,
+            "url": raw_target if proto in ("HTTP", "HTTPS") else "",
+            "threads": bounded_int("threads", 8, 1, 1024),
+            "duration": bounded_int("duration", 30, 1, 30 * 24 * 60 * 60),
+            "rate": bounded_int("rate", 100, 1, 100000),
+            "packet_size": bounded_int("packet_size", settings.default_packet_size,
+                                       1, 1024 * 1024),
+            "timeout": bounded_int("timeout", settings.default_timeout_ms, 500, 60000),
+            "headers": dict(headers),
+        }
+        if proto in ("HTTP", "HTTPS") and not str(config.get("url") or "").strip():
+            safe["url"] = build_http_url(raw_target, host, port, proto)
+        return safe
 
     def _do_remote_start(self):
         """延迟执行远程引擎启动；若引擎忙（本地测试中）则先停止旧测试再启动。"""
@@ -767,3 +868,21 @@ class CollabView(ScrollArea):
         self._log_lines.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
         self._log_lines = self._log_lines[-30:]
         self.logLabel.setText("\n".join(self._log_lines))
+
+    def _copy_log(self):
+        """复制当前可见的协同日志，方便排障和分享。"""
+        if not self._log_lines:
+            InfoBar.warning(L("暂无日志", "No log"),
+                            L("当前没有可复制的协同日志", "There is no collaborative log to copy"),
+                            parent=self.window())
+            return
+        QGuiApplication.clipboard().setText("\n".join(self._log_lines))
+        InfoBar.success(L("已复制", "Copied"),
+                        L(f"已复制 {len(self._log_lines)} 条协同日志",
+                          f"Copied {len(self._log_lines)} collaborative log entries"),
+                        parent=self.window())
+
+    def _clear_log(self):
+        """只清空页面中的临时日志，不影响审计日志文件。"""
+        self._log_lines.clear()
+        self.logLabel.setText(L("（暂无）", "(empty)"))

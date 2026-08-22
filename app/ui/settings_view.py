@@ -1,10 +1,10 @@
 """设置页：主题/语言/默认参数/日志管理/检查更新/作者。"""
 from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QCursor, QFont
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget, QPushButton)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ColorDialog, ComboBox, InfoBar,
-                            PushButton, ScrollArea, SimpleCardWidget,
+                            MessageBox, PushButton, ScrollArea, SimpleCardWidget,
                             SpinBox, StrongBodyLabel, SubtitleLabel, SwitchButton,
                             setTheme, setThemeColor, Theme, IconWidget,
                             FluentIcon, isDarkTheme, qconfig)
@@ -126,7 +126,7 @@ class ThemeColorPicker(QWidget):
         # 简化界面：隐藏"原色"对比卡（下半截），新色卡拉伸为整块实时预览
         dlg.oldColorCard.hide()
         dlg.newColorCard.setFixedHeight(256)
-        # pip 版 qfluentwidgets 缺失 .qm 翻译文件，对话框内部文本会回退为英文，手动跟随界面语言
+        # 显式设置关键按钮和标签，确保对话框始终跟随 NetPulse 选择的语言。
         dlg.yesButton.setText(L("确定", "OK"))
         dlg.cancelButton.setText(L("取消", "Cancel"))
         dlg.editLabel.setText(L("编辑颜色", "Edit Color"))
@@ -182,7 +182,11 @@ class SettingsView(ScrollArea):
         al.addWidget(SettingRow(L("启动时自动检查更新", "Auto-check for updates on launch"),
                                 L("发现新版本时弹窗提示", "Show notification when new version is available"), self.autoUpdateSwitch, appear))
         self.langCombo = ComboBox()
-        self.langCombo.addItems([L("跟随系统", "Auto (system)"), "简体中文", "English"])
+        self.langCombo.addItems([
+            L("跟随系统", "Auto (system)"),
+            L("简体中文", "Simplified Chinese"),
+            "English",
+        ])
         self.langCombo.setCurrentIndex(
             {"auto": 0, "zh-CN": 1, "en-US": 2}.get(settings.language, 0))
         self.langCombo.currentIndexChanged.connect(self._lang_changed)
@@ -215,7 +219,56 @@ class SettingsView(ScrollArea):
         self.rateSpin.valueChanged.connect(lambda v: settings.set("default_rate", v))
         dl.addWidget(SettingRow(L("默认速率上限(QPS)", "Default rate cap"),
                                 L("令牌桶填充速率", "Token bucket fill rate"), self.rateSpin, defaults))
+        self.durationSpin = SpinBox()
+        self.durationSpin.setRange(1, 3600)
+        self.durationSpin.setValue(settings.default_duration)
+        self.durationSpin.valueChanged.connect(
+            lambda v: settings.set("default_duration", v))
+        dl.addWidget(SettingRow(L("默认持续时间(秒)", "Default duration (s)"),
+                                L("新会话的初始测试时长", "Initial test duration for new sessions"),
+                                self.durationSpin, defaults))
+        self.packetSizeSpin = SpinBox()
+        self.packetSizeSpin.setRange(1, 1024 * 1024)
+        self.packetSizeSpin.setSingleStep(64)
+        self.packetSizeSpin.setValue(settings.default_packet_size)
+        self.packetSizeSpin.valueChanged.connect(
+            lambda v: settings.set("default_packet_size", v))
+        dl.addWidget(SettingRow(L("默认报文大小(字节)", "Default packet size (bytes)"),
+                                L("TCP、UDP 与插件协议的发送载荷大小",
+                                  "Payload size for TCP, UDP and plugin protocols"),
+                                self.packetSizeSpin, defaults))
         root.addWidget(defaults)
+
+        # 设置备份与恢复（仅处理安全偏好，不导出授权目标、Token 或插件私有数据）
+        dataCard = SimpleCardWidget(self.view)
+        dataLay = QVBoxLayout(dataCard)
+        dataLay.setContentsMargins(20, 16, 20, 16)
+        dataLay.setSpacing(6)
+        dataLay.addWidget(StrongBodyLabel(L("备份与诊断", "Backup & Diagnostics"), dataCard))
+        safeHint = CaptionLabel(L(
+            "备份仅包含外观、语言、默认测试参数、托盘和更新偏好；"
+            "不会包含授权目标、上次测试、访问令牌、插件私有数据或搜索历史。",
+            "Backups contain only appearance, language, test defaults, tray and update preferences; "
+            "authorized targets, previous tests, access tokens, private plugin data and search history are excluded."),
+            dataCard)
+        safeHint.setWordWrap(True)
+        dataLay.addWidget(safeHint)
+        dataButtons = QHBoxLayout()
+        self.backupSettingsBtn = PushButton(L("导出设置备份…", "Export Settings…"), dataCard)
+        self.backupSettingsBtn.clicked.connect(self._export_settings_backup)
+        self.restoreSettingsBtn = PushButton(L("恢复设置备份…", "Restore Settings…"), dataCard)
+        self.restoreSettingsBtn.clicked.connect(self._import_settings_backup)
+        self.resetPreferencesBtn = PushButton(L("恢复偏好默认", "Reset Preferences"), dataCard)
+        self.resetPreferencesBtn.clicked.connect(self._reset_preferences)
+        self.copyDiagnosticsBtn = PushButton(L("复制诊断摘要", "Copy Diagnostics"), dataCard)
+        self.copyDiagnosticsBtn.clicked.connect(self._copy_diagnostic_summary)
+        dataButtons.addWidget(self.backupSettingsBtn)
+        dataButtons.addWidget(self.restoreSettingsBtn)
+        dataButtons.addWidget(self.resetPreferencesBtn)
+        dataButtons.addWidget(self.copyDiagnosticsBtn)
+        dataButtons.addStretch(1)
+        dataLay.addLayout(dataButtons)
+        root.addWidget(dataCard)
 
         # 日志
         logcard = SimpleCardWidget(self.view)
@@ -301,23 +354,257 @@ class SettingsView(ScrollArea):
 
     def _lang_changed(self, idx):
         settings.set("language", {0: "auto", 1: "zh-CN", 2: "en-US"}.get(idx, "auto"))
-        try:
-            from qfluentwidgets import setLanguage, Language
-            from app.ui.i18n import current_lang
-            setLanguage(Language.EN if current_lang() == "en-US"
-                        else getattr(Language, "ZH_CN", Language.ZH_CN))
-        except Exception:
-            pass
         InfoBar.success(L("已保存", "Saved"),
                         L("界面语言将在重启后完全生效", "Language fully applies after restart"),
                         parent=self.window())
 
+    def _sync_preference_controls(self):
+        """从 settings 同步本页控件，不触发写回信号。"""
+        controls = (
+            (self.darkSwitch, "setChecked", settings.theme == "dark"),
+            (self.traySwitch, "setChecked", bool(settings.minimize_to_tray)),
+            (self.autoUpdateSwitch, "setChecked", bool(settings.auto_check_updates)),
+            (self.langCombo, "setCurrentIndex",
+             {"auto": 0, "zh-CN": 1, "en-US": 2}.get(settings.language, 0)),
+            (self.threadSpin, "setValue", int(settings.default_threads)),
+            (self.timeoutSpin, "setValue", int(settings.default_timeout_ms)),
+            (self.rateSpin, "setValue", int(settings.default_rate)),
+            (self.durationSpin, "setValue", int(settings.default_duration)),
+            (self.packetSizeSpin, "setValue", int(settings.default_packet_size)),
+        )
+        for control, setter, value in controls:
+            was_blocked = control.blockSignals(True)
+            getattr(control, setter)(value)
+            control.blockSignals(was_blocked)
+        self.colorPicker._refresh()
+
+    def _apply_preference_theme(self):
+        """恢复/重置后立即应用主题和强调色。"""
+        setTheme(Theme.DARK if settings.theme == "dark" else Theme.LIGHT)
+        setThemeColor(QColor(str(settings.theme_color)))
+        self.colorPicker._refresh()
+
+    def _show_language_restart_notice(self):
+        InfoBar.info(
+            L("需要重启", "Restart Required"),
+            L("已恢复语言偏好，界面语言将在重启后完全生效。",
+              "The language preference was restored and will fully apply after restart."),
+            parent=self.window(), duration=5000)
+
+    def _export_settings_backup(self):
+        import os
+        import time
+
+        default_name = f"netpulse-settings-{time.strftime('%Y%m%d')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, L("导出设置备份", "Export settings backup"), default_name,
+            L("JSON 设置备份 (*.json)", "JSON settings backup (*.json)"))
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".json"
+        try:
+            count = settings.export_backup(path, APP_VERSION)
+        except Exception as e:
+            InfoBar.error(
+                L("导出失败", "Export Failed"),
+                L(f"无法写入设置备份：{e}", f"Could not write the settings backup: {e}"),
+                parent=self.window(), duration=6000)
+            return
+        InfoBar.success(
+            L("备份已导出", "Backup Exported"),
+            L(f"已写入 {count} 项安全偏好，敏感数据未包含。",
+              f"Saved {count} safe preferences; sensitive data was excluded."),
+            parent=self.window(), duration=4000)
+
+    def _import_settings_backup(self):
+        import os
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, L("恢复设置备份", "Restore settings backup"), "",
+            L("JSON 设置备份 (*.json);;所有文件 (*.*)",
+              "JSON settings backup (*.json);;All files (*.*)"))
+        if not path:
+            return
+        box = MessageBox(
+            L("恢复设置备份", "Restore Settings Backup"),
+            L("将使用备份中的安全偏好覆盖当前偏好。恢复前会自动创建 settings.json.bak；"
+              "授权目标、访问令牌、插件私有数据和测试历史不会改变。是否继续？",
+              "Safe preferences in the backup will replace the current preferences. "
+              "A settings.json.bak file will be created first; authorized targets, access tokens, "
+              "private plugin data and test history will not change. Continue?"),
+            self.window())
+        if not box.exec():
+            return
+
+        old_language = settings.language
+        try:
+            result = settings.import_backup(path)
+        except Exception as e:
+            InfoBar.error(
+                L("恢复失败", "Restore Failed"),
+                L(f"备份无效、版本不兼容或无法写入：{e}",
+                  f"The backup is invalid, incompatible, or could not be written: {e}"),
+                parent=self.window(), duration=7000)
+            return
+
+        self._sync_preference_controls()
+        self._apply_preference_theme()
+        applied = len(result["applied"])
+        ignored = len(result["ignored"])
+        backup_name = os.path.basename(result["backup_path"])
+        detail = L(
+            f"已恢复 {applied} 项偏好；原设置已保存为 {backup_name}。",
+            f"Restored {applied} preferences; previous settings were saved as {backup_name}.")
+        if ignored:
+            detail += L(f" 已安全忽略 {ignored} 个非白名单字段。",
+                        f" Safely ignored {ignored} non-allowlisted fields.")
+        InfoBar.success(L("设置已恢复", "Settings Restored"), detail,
+                        parent=self.window(), duration=5000)
+        if old_language != settings.language:
+            self._show_language_restart_notice()
+
+    def _reset_preferences(self):
+        box = MessageBox(
+            L("恢复偏好默认", "Reset Preferences"),
+            L("将重置外观、语言、默认测试参数、托盘和更新偏好。"
+              "授权状态、授权目标、访问令牌、插件及其私有数据不会被清除。是否继续？",
+              "This resets appearance, language, test defaults, tray and update preferences. "
+              "Consent, authorized targets, access tokens, plugins and private plugin data will not be cleared. Continue?"),
+            self.window())
+        if not box.exec():
+            return
+
+        old_language = settings.language
+        try:
+            changed = settings.reset_preferences()
+        except Exception as e:
+            InfoBar.error(
+                L("重置失败", "Reset Failed"),
+                L(f"无法保存默认偏好：{e}", f"Could not save default preferences: {e}"),
+                parent=self.window(), duration=6000)
+            return
+
+        self._sync_preference_controls()
+        self._apply_preference_theme()
+        InfoBar.success(
+            L("偏好已重置", "Preferences Reset"),
+            L(f"已恢复 {len(changed)} 项默认偏好，敏感状态保持不变。",
+              f"Restored {len(changed)} default preferences; sensitive state was preserved."),
+            parent=self.window(), duration=4000)
+        if old_language != settings.language:
+            self._show_language_restart_notice()
+
+    def _diagnostic_summary(self):
+        """生成适合粘贴给维护者的脱敏纯文本摘要。"""
+        import os
+        import platform
+        import sys
+        from collections import Counter
+        from datetime import datetime
+
+        from PySide6 import __version__ as pyside_version
+        from PySide6.QtCore import qVersion
+
+        try:
+            from importlib.metadata import version
+            fluent_version = version("PySide6-Fluent-Widgets")
+        except Exception:
+            fluent_version = L("未知", "Unknown")
+
+        try:
+            from app.services.plugins import plugin_manager
+            records = plugin_manager.records()
+            plugin_states = Counter(rec.state for rec in records)
+            plugin_total = len(records)
+        except Exception:
+            plugin_states = Counter()
+            plugin_total = 0
+
+        safe = settings.safe_snapshot()
+        log_exists = os.path.isfile(log.file_path)
+        log_size = os.path.getsize(log.file_path) if log_exists else 0
+        crash_path = os.path.join(os.path.dirname(log.file_path), "crash.log")
+        crash_exists = os.path.isfile(crash_path)
+        crash_size = os.path.getsize(crash_path) if crash_exists else 0
+        settings_dir = os.path.dirname(settings.path)
+        settings_writable = os.access(settings_dir, os.W_OK)
+
+        yes_no = lambda value: L("是", "Yes") if value else L("否", "No")
+        theme_name = L("深色", "Dark") if safe["theme"] == "dark" else L("浅色", "Light")
+        language_name = {
+            "auto": L("跟随系统", "System"),
+            "zh-CN": L("简体中文", "Simplified Chinese"),
+            "en-US": "English",
+        }.get(safe["language"], safe["language"])
+        mode_name = L("打包版本", "Packaged") if getattr(sys, "frozen", False) else L("源码运行", "Source")
+
+        lines = [
+            "NetPulse — " + L("脱敏诊断摘要", "Redacted Diagnostic Summary"),
+            L("生成时间：", "Generated: ") + datetime.now().astimezone().isoformat(timespec="seconds"),
+            L("应用版本：", "App version: ") + f"{APP_VERSION} ({mode_name})",
+            L("操作系统：", "OS: ") + " ".join(filter(None, (
+                platform.system(), platform.release(), platform.machine()))),
+            L("Python：", "Python: ") + platform.python_version(),
+            L("PySide6 / Qt：", "PySide6 / Qt: ") + f"{pyside_version} / {qVersion()}",
+            L("Fluent Widgets：", "Fluent Widgets: ") + fluent_version,
+            L("主题 / 强调色：", "Theme / accent: ") + f"{theme_name} / {safe['theme_color']}",
+            L("语言：", "Language: ") + language_name,
+            L("默认线程 / 超时 / QPS：", "Defaults threads / timeout / QPS: ")
+            + f"{safe['default_threads']} / {safe['default_timeout_ms']} ms / {safe['default_rate']}",
+            L("默认时长 / 数据包：", "Default duration / packet: ")
+            + f"{safe['default_duration']} s / {safe['default_packet_size']} B",
+            L("最小化到托盘 / 自动更新：", "Tray minimize / auto update: ")
+            + f"{yes_no(safe['minimize_to_tray'])} / {yes_no(safe['auto_check_updates'])}",
+            L("设置目录可写：", "Settings directory writable: ") + yes_no(settings_writable),
+            L("审计日志：", "Audit log: ")
+            + (L(f"可用（{log_size} 字节）", f"Available ({log_size} bytes)")
+               if log_exists else L("不存在", "Not found")),
+            L("崩溃日志：", "Crash log: ")
+            + (L(f"可用（{crash_size} 字节）", f"Available ({crash_size} bytes)")
+               if crash_exists else L("不存在", "Not found")),
+            L("插件（总数/运行/禁用/错误/未加载）：",
+              "Plugins (total/running/disabled/error/unloaded): ")
+            + f"{plugin_total}/{plugin_states['loaded']}/{plugin_states['disabled']}/"
+              f"{plugin_states['error']}/{plugin_states['unloaded']}",
+            L("隐私：已排除令牌、授权目标、测试目标、插件私有数据、搜索历史和本机绝对路径。",
+              "Privacy: tokens, authorized/test targets, private plugin data, search history and absolute local paths are excluded."),
+        ]
+        return "\n".join(lines)
+
+    def _copy_diagnostic_summary(self):
+        try:
+            summary = self._diagnostic_summary()
+            QApplication.clipboard().setText(summary)
+        except Exception as e:
+            InfoBar.error(
+                L("复制失败", "Copy Failed"),
+                L(f"无法生成诊断摘要：{e}", f"Could not create the diagnostic summary: {e}"),
+                parent=self.window(), duration=6000)
+            return
+        InfoBar.success(
+            L("已复制", "Copied"),
+            L("脱敏诊断摘要已复制到剪贴板。", "The redacted diagnostic summary was copied to the clipboard."),
+            parent=self.window(), duration=3000)
+
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, L("导出日志", "Export log"),
-                                              "netpulse-audit.log", "Log (*.log *.txt)")
-        if path:
+                                              "netpulse-audit.log",
+                                              L("日志文件 (*.log *.txt)",
+                                                "Log files (*.log *.txt)"))
+        if not path:
+            return
+        import os
+        if not os.path.splitext(path)[1]:
+            path += ".log"
+        try:
             n = log.export_text(path)
-            InfoBar.success(L("导出成功", "Exported"), L(f"{n} 条记录", f"{n} entries"), parent=self.window())
+        except Exception as e:
+            InfoBar.error(L("导出失败", "Export Failed"), str(e),
+                          parent=self.window(), duration=6000)
+            return
+        InfoBar.success(L("导出成功", "Exported"),
+                        L(f"{n} 条记录", f"{n} entries"), parent=self.window())
 
     def _open_dir(self):
         import os

@@ -3,10 +3,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget, QProgressBar)
 from qfluentwidgets import (BodyLabel, CaptionLabel, PrimaryPushButton,
-                            ScrollArea, SimpleCardWidget,
+                            PushButton, ScrollArea, SimpleCardWidget,
                             StrongBodyLabel, TitleLabel, isDarkTheme, qconfig)
 
 from app.services.monitor import monitor
+from app.services.stress import engine
 from app.ui.charts import ACCENT, GREEN, PURPLE, HoverChart
 from app.ui.i18n import L
 
@@ -198,6 +199,26 @@ class DashboardView(ScrollArea):
         ql.addWidget(self.quickBtn)
         root.addWidget(quick)
 
+        # 当前压测 / 最近一次结果：只展示引擎状态并跳转，不在主页重复启停逻辑。
+        self.testStatusCard = SimpleCardWidget(self.view)
+        tsl = QHBoxLayout(self.testStatusCard)
+        tsl.setContentsMargins(20, 12, 20, 12)
+        tsl.setSpacing(12)
+        test_col = QVBoxLayout()
+        test_col.setSpacing(3)
+        self.testStateTitle = StrongBodyLabel(L("最近测试", "Recent Test"), self.testStatusCard)
+        self.testStateDetail = BodyLabel(
+            L("尚无测试记录", "No test has been run yet"), self.testStatusCard
+        )
+        self.testStateDetail.setWordWrap(True)
+        test_col.addWidget(self.testStateTitle)
+        test_col.addWidget(self.testStateDetail)
+        tsl.addLayout(test_col, 1)
+        self.testDetailBtn = PushButton(L("查看压力测试", "View Stress Test"), self.testStatusCard)
+        self.testDetailBtn.clicked.connect(lambda: self.window().go_stress())
+        tsl.addWidget(self.testDetailBtn)
+        root.addWidget(self.testStatusCard)
+
         # 资源统计卡片（CPU、内存用 PercentCard，网络用普通 StatCard）
         grid = QGridLayout()
         grid.setSpacing(12)
@@ -221,13 +242,66 @@ class DashboardView(ScrollArea):
         cl.addWidget(ct)
         self.plot = HoverChart(window_points=60, y_min=0.0)
         self.plot.addLegend(offset=(8, 8))
-        self.plot.add_series(L("CPU %", "CPU %"), ACCENT, " %")
-        self.plot.add_series(L("内存 %", "Memory %"), PURPLE, " %")
+        self._cpu_name = L("CPU %", "CPU %")
+        self._mem_name = L("内存 %", "Memory %")
+        self.plot.add_series(self._cpu_name, ACCENT, " %")
+        self.plot.add_series(self._mem_name, PURPLE, " %")
         cl.addWidget(self.plot, 1)
         root.addWidget(chart_card, 1)
 
         self._cpu_hist, self._mem_hist = [], []
         monitor.updated.connect(self._on_update)
+        engine.started.connect(self._on_test_started)
+        engine.stopping.connect(self._on_test_stopping)
+        engine.snapshot.connect(self._on_test_snapshot)
+        engine.report_ready.connect(self._on_test_report)
+        if engine.running:
+            self._on_test_started()
+
+    @staticmethod
+    def _number(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _on_test_started(self):
+        self.testStateTitle.setText(L("当前测试", "Current Test"))
+        self.testStateDetail.setText(L("正在启动，等待实时数据...", "Starting, waiting for live data..."))
+
+    def _on_test_stopping(self):
+        self.testStateTitle.setText(L("当前测试", "Current Test"))
+        self.testStateDetail.setText(L("正在停止，等待汇总结果...", "Stopping, waiting for summary..."))
+
+    def _on_test_snapshot(self, d):
+        progress = max(0.0, min(100.0, self._number(d.get("progress")) * 100.0))
+        qps = self._number(d.get("qps"))
+        success = int(self._number(d.get("success")))
+        fail = int(self._number(d.get("fail")))
+        target_count = len(d.get("targets") or [])
+        self.testStateTitle.setText(L("当前测试", "Current Test"))
+        if target_count:
+            self.testStateDetail.setText(L(
+                f"{target_count} 个目标 · 进度 {progress:.0f}% · QPS {qps:.1f} · 成功 {success} / 失败 {fail}",
+                f"{target_count} target(s) · {progress:.0f}% · {qps:.1f} QPS · {success} ok / {fail} failed",
+            ))
+        else:
+            self.testStateDetail.setText(L(
+                f"进度 {progress:.0f}% · QPS {qps:.1f} · 成功 {success} / 失败 {fail}",
+                f"{progress:.0f}% · {qps:.1f} QPS · {success} ok / {fail} failed",
+            ))
+
+    def _on_test_report(self, report):
+        total = max(0, int(self._number(report.get("total"))))
+        fail = max(0, int(self._number(report.get("fail"))))
+        error_rate = fail / total * 100.0 if total else 0.0
+        avg = self._number(report.get("avg"))
+        p99 = self._number(report.get("p99"))
+        self.testStateTitle.setText(L("最近结果", "Latest Result"))
+        self.testStateDetail.setText(L(
+            f"已完成 · 错误率 {error_rate:.2f}% · 平均 {avg:.1f} ms · P99 {p99:.1f} ms",
+            f"Completed · {error_rate:.2f}% errors · {avg:.1f} ms avg · P99 {p99:.1f} ms",
+        ))
 
     def _on_update(self, d):
         cpu = float(d["cpu"])
@@ -257,6 +331,6 @@ class DashboardView(ScrollArea):
         self._cpu_hist = self._cpu_hist[-60:]
         self._mem_hist = self._mem_hist[-60:]
         self.plot.set_data({
-            L("CPU %", "CPU %"): self._cpu_hist,
-            L("内存 %", "Memory %"): self._mem_hist,
+            self._cpu_name: self._cpu_hist,
+            self._mem_name: self._mem_hist,
         })

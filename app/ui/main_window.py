@@ -3,7 +3,7 @@ import os
 import sys
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import QSystemTrayIcon
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import FluentWindow, NavigationItemPosition, RoundMenu, Action, isDarkTheme
@@ -49,6 +49,7 @@ class MainWindow(FluentWindow):
         self.init_navigation()
         self.init_window()
         self._init_tray()
+        self._init_shortcuts()
         self._init_plugins()
 
         # BusyOverlay 创建为子控件，但初始隐藏
@@ -65,10 +66,16 @@ class MainWindow(FluentWindow):
                              NavigationItemPosition.BOTTOM)
 
     def init_window(self):
+        # 非 Windows 平台插件（含离屏测试）无法真正绘制 Mica。如果仍保持
+        # “Mica 已启用”的透明背景，深色模式会被白色 backing surface 合成，
+        # 导致白字消失；此时明确关闭 Mica，让 FluentWindow 使用主题回退底色。
+        if QGuiApplication.platformName().lower() != "windows":
+            self.setMicaEffectEnabled(False)
+            return
         try:
             self.setMicaEffectEnabled(True)
         except Exception:
-            pass
+            self.setMicaEffectEnabled(False)
 
     def _ensure_overlay(self):
         """确保 overlay 已创建（首次调用时在窗口显示后创建）。"""
@@ -148,6 +155,24 @@ class MainWindow(FluentWindow):
 
         tray_menu.addSeparator()
 
+        stress_action = Action(FIF.SPEED_HIGH, L("压力测试", "Stress Test"), self)
+        stress_action.triggered.connect(self.go_stress)
+        tray_menu.addAction(stress_action)
+
+        monitor_action = Action(MON_ICON, L("监控面板", "Monitor"), self)
+        monitor_action.triggered.connect(self.go_monitor)
+        tray_menu.addAction(monitor_action)
+
+        market_action = Action(PLUGIN_ICON, L("插件", "Plugins"), self)
+        market_action.triggered.connect(self.go_market)
+        tray_menu.addAction(market_action)
+
+        settings_action = Action(FIF.SETTING, L("设置", "Settings"), self)
+        settings_action.triggered.connect(self.go_settings)
+        tray_menu.addAction(settings_action)
+
+        tray_menu.addSeparator()
+
         quit_action = Action(FIF.CLOSE, L("退出", "Quit"), self)
         quit_action.triggered.connect(self._quit_app)
         tray_menu.addAction(quit_action)
@@ -155,6 +180,23 @@ class MainWindow(FluentWindow):
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+    def _init_shortcuts(self):
+        """注册全局页面快捷键，并保存引用避免被 Qt 回收。"""
+        bindings = (
+            ("Ctrl+1", self.go_dashboard),
+            ("Ctrl+2", self.go_stress),
+            ("Ctrl+3", self.go_collab),
+            ("Ctrl+4", self.go_monitor),
+            ("Ctrl+5", self.go_market),
+            ("Ctrl+,", self.go_settings),
+        )
+        self._page_shortcuts = []
+        for sequence, callback in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(callback)
+            self._page_shortcuts.append(shortcut)
 
     def _on_tray_activated(self, reason):
         """托盘图标双击显示窗口。"""
@@ -196,8 +238,31 @@ class MainWindow(FluentWindow):
         else:
             event.accept()
 
+    def _go_to(self, widget):
+        """从普通窗口或托盘状态直达指定页面。"""
+        # 页面内按钮/快捷键在窗口已显示时只切页，避免重复切换窗口状态；
+        # 真正处于托盘隐藏或最小化状态时才执行恢复流程。
+        if not self.isVisible() or self.isMinimized():
+            self._show_from_tray()
+        self.switchTo(widget)
+
+    def go_dashboard(self):
+        self._go_to(self.dashboard)
+
     def go_stress(self):
-        self.switchTo(self.stress)
+        self._go_to(self.stress)
+
+    def go_collab(self):
+        self._go_to(self.collab)
+
+    def go_monitor(self):
+        self._go_to(self.monitor)
+
+    def go_market(self):
+        self._go_to(self.market)
+
+    def go_settings(self):
+        self._go_to(self.settingsView)
 
     def resizeEvent(self, event):
         """窗口大小变化时同步更新 overlay 大小。"""

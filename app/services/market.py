@@ -10,6 +10,7 @@
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -79,6 +80,13 @@ def device_flow_poll(device_code: str, interval: int, expires_in: int) -> str:
 
 _TIMEOUT = 10
 _CACHE_WINDOW = 300  # 秒：raw 源加 ?t= 参数穿透 CDN 缓存，5 分钟一档
+_MAX_PLUGIN_BYTES = 2 * 1024 * 1024
+_MARKET_PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def is_valid_market_plugin_id(value) -> bool:
+    """市场插件 ID 只能是安全的 ASCII 文件名片段。"""
+    return type(value) is str and bool(_MARKET_PLUGIN_ID_RE.fullmatch(value))
 
 
 def _fetch_index_raw(url: str, kind: str):
@@ -151,7 +159,14 @@ class MarketClient(QObject):
                 return None
             out = []
             for e in entries:
-                if not isinstance(e, dict) or not e.get("id") or not e.get("file"):
+                if not isinstance(e, dict):
+                    continue
+                pid = e.get("id")
+                file_value = e.get("file")
+                digest = str(e.get("sha256") or "")
+                if (not is_valid_market_plugin_id(pid)
+                        or type(file_value) is not str or not file_value.strip()
+                        or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None):
                     continue
                 out.append(e)
             return out
@@ -171,6 +186,13 @@ class MarketClient(QObject):
 
     def _install_work(self, entry: dict):
         pid = entry.get("id", "?")
+        if not is_valid_market_plugin_id(pid):
+            self.download_failed.emit(str(pid), "invalid plugin id")
+            return
+        expect = str(entry.get("sha256") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expect) is None:
+            self.download_failed.emit(pid, "missing or invalid sha256")
+            return
         # 解析插件文件地址：相对路径基于仓库 marketplace 目录（raw 直链）；也可填完整 URL
         f = entry.get("file", "")
         if f.startswith("http://") or f.startswith("https://"):
@@ -179,21 +201,29 @@ class MarketClient(QObject):
             url = ("https://raw.githubusercontent.com/Carlown/NetPulse"
                    f"/master/marketplace/{f}")
         try:
-            r = requests.get(url, timeout=_TIMEOUT)
-            r.raise_for_status()
-            content = r.content
+            with requests.get(url, timeout=_TIMEOUT, stream=True) as r:
+                r.raise_for_status()
+                size_header = int(r.headers.get("Content-Length", 0) or 0)
+                if size_header > _MAX_PLUGIN_BYTES:
+                    raise ValueError("plugin file exceeds 2 MiB limit")
+                content_buf = bytearray()
+                for chunk in r.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    content_buf.extend(chunk)
+                    if len(content_buf) > _MAX_PLUGIN_BYTES:
+                        raise ValueError("plugin file exceeds 2 MiB limit")
+                content = bytes(content_buf)
         except Exception as e:
             self.download_failed.emit(pid, str(e))
             return
-        # sha256 完整性校验（索引提供时强制校验，不匹配拒绝安装）
-        expect = (entry.get("sha256") or "").strip().lower()
-        if expect:
-            got = hashlib.sha256(content).hexdigest()
-            if got != expect:
-                self.download_failed.emit(
-                    pid, "sha256 mismatch: "
-                    f"{got[:12]}... != {expect[:12]}...")
-                return
+        # sha256 完整性校验强制执行，不匹配拒绝安装。
+        got = hashlib.sha256(content).hexdigest()
+        if got != expect:
+            self.download_failed.emit(
+                pid, "sha256 mismatch: "
+                f"{got[:12]}... != {expect[:12]}...")
+            return
         # 写入临时文件交给主线程导入
         try:
             name = f"{pid}.py"

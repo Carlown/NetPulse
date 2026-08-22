@@ -92,22 +92,39 @@ class HoverChart(QChartView):
         """兼容旧 API：Qt Charts 图例内置，无需调用。"""
         pass
 
-    def set_data(self, data_dict: dict[str, list[float]]):
-        """更新曲线数据；自动模式下坐标轴跟随最新数据。"""
+    def set_window_points(self, window_points: int):
+        """安全调整实时窗口大小，并恢复自动跟随。"""
+        try:
+            points = int(window_points)
+        except (TypeError, ValueError):
+            return self._win
+        self._win = max(2, points)
+        self.chart().zoomReset()
+        self._auto = True
+        self._fit_axes_to_series()
+        return self._win
+
+    def _fit_axes_to_series(self):
+        """按当前曲线与窗口大小重排坐标轴。"""
         n_max = 0
         y_max = self._y_min
+        for _name, (series, _unit) in self._series.items():
+            n_max = max(n_max, series.count())
+            for point in series.pointsVector():
+                y_max = max(y_max, point.y())
+        top = y_max if y_max > self._y_min else self._y_min + 1.0
+        self._ax.setRange(0, max(self._win, n_max, 1))
+        self._ay.setRange(self._y_min, top)
+        self._ay.applyNiceNumbers()
+
+    def set_data(self, data_dict: dict[str, list[float]]):
+        """更新曲线数据；自动模式下坐标轴跟随最新数据。"""
         for name, (s, _unit) in self._series.items():
             y = data_dict.get(name, [])
             yv = y[-self._win:] if len(y) > self._win else y
-            n_max = max(n_max, len(yv))
             s.replace([QPointF(i, v) for i, v in enumerate(yv)])
-            if yv:
-                y_max = max(y_max, max(yv))
         if self._auto:
-            top = y_max if y_max > self._y_min else self._y_min + 1.0
-            self._ax.setRange(0, max(self._win, n_max))
-            self._ay.setRange(self._y_min, top)
-            self._ay.applyNiceNumbers()
+            self._fit_axes_to_series()
 
     # ---- 缩放交互 ----
 
@@ -132,16 +149,7 @@ class HoverChart(QChartView):
         self._auto = True
         self._dbl_timer.start()
         # 立即按当前数据重排坐标轴
-        n_max = 0
-        y_max = self._y_min
-        for _name, (s, _u) in self._series.items():
-            n_max = max(n_max, s.count())
-            for p in s.pointsVector():
-                y_max = max(y_max, p.y())
-        top = y_max if y_max > self._y_min else self._y_min + 1.0
-        self._ax.setRange(0, max(self._win, n_max))
-        self._ay.setRange(self._y_min, top)
-        self._ay.applyNiceNumbers()
+        self._fit_axes_to_series()
         ev.accept()
 
     # ---- 悬停数值 ----

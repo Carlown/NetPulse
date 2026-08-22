@@ -1,8 +1,10 @@
 """压力测试页：左侧配置 + 右侧实时统计与报告。"""
+import csv
 import json
 import time as _time
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
@@ -10,9 +12,10 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
                             PrimaryPushButton, ProgressBar, PushButton,
                             ScrollArea, SimpleCardWidget, Slider, SpinBox,
                             StrongBodyLabel, SubtitleLabel, TextEdit,
-                            isDarkTheme)
+                            isDarkTheme, qconfig)
 
-from app.services.auth import add_authorized, is_authorized, normalize_host
+from app.services.auth import (add_authorized, build_http_url, is_authorized,
+                               normalize_host)
 from app.services.logger import log
 from app.services.settings import settings
 from app.services.stress import engine
@@ -71,7 +74,11 @@ def _subtle_text_color() -> str:
 class MiniStat(QLabel):
     def __init__(self, color, parent=None):
         super().__init__("--", parent)
-        self.setStyleSheet(f"font-size:22px; font-weight:600; color:{color}; background:transparent;")
+        self.set_color(color)
+
+    def set_color(self, color):
+        self.setStyleSheet(
+            f"font-size:22px; font-weight:600; color:{color}; background:transparent;")
 
 
 class StressView(ScrollArea):
@@ -103,8 +110,13 @@ class StressView(ScrollArea):
         rep_head = QHBoxLayout()
         rep_head.addWidget(StrongBodyLabel(L("汇总报告", "Summary Report"), self.reportCard))
         rep_head.addStretch(1)
+        self.copyReportBtn = PushButton(L("复制摘要", "Copy Summary"), self.reportCard)
+        self.copyReportBtn.clicked.connect(self._copy_report_summary)
+        self.copyReportBtn.setEnabled(False)
+        rep_head.addWidget(self.copyReportBtn)
         self.exportReportBtn = PushButton(L("导出报告", "Export Report"), self.reportCard)
         self.exportReportBtn.clicked.connect(self._export_report)
+        self.exportReportBtn.setEnabled(False)
         rep_head.addWidget(self.exportReportBtn)
         rl.addLayout(rep_head)
         self.reportLabel = BodyLabel(L("尚未执行测试。", "No test executed yet."), self.reportCard)
@@ -118,6 +130,7 @@ class StressView(ScrollArea):
         engine.report_ready.connect(self._on_report)
         engine.started.connect(self._on_engine_started)
         engine.stopping.connect(self._on_engine_stopping)
+        qconfig.themeChanged.connect(self._refresh_theme_colors)
         self._dur_unit_idx = 0  # 持续时间单位索引（秒/分/时/天）
         self._waiting_start = False
         self._startup_busy = False   # 是否正在显示启动等待遮罩
@@ -265,10 +278,12 @@ class StressView(ScrollArea):
             self.window(),
             L("导出配置", "Export Config"),
             default_name,
-            "JSON (*.json)",
+            L("JSON 配置 (*.json)", "JSON Config (*.json)"),
         )
         if not path:
             return
+        if not path.lower().endswith(".json"):
+            path += ".json"
         cfg = self._collect_config()
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -293,7 +308,8 @@ class StressView(ScrollArea):
             self.window(),
             L("导入配置", "Import Config"),
             "",
-            "JSON (*.json);;All Files (*)",
+            L("JSON 配置 (*.json);;所有文件 (*.*)",
+              "JSON Config (*.json);;All Files (*.*)"),
         )
         if not path:
             return
@@ -417,7 +433,13 @@ class StressView(ScrollArea):
 
         # 授权列表
         lay.addSpacing(6)
-        lay.addWidget(StrongBodyLabel(L("已授权目标", "Authorized Targets"), card))
+        auth_head = QHBoxLayout()
+        auth_head.addWidget(StrongBodyLabel(L("已授权目标", "Authorized Targets"), card))
+        auth_head.addStretch(1)
+        self.clearAuthBtn = PushButton(L("清空", "Clear"), card)
+        self.clearAuthBtn.clicked.connect(self._clear_authorizations)
+        auth_head.addWidget(self.clearAuthBtn)
+        lay.addLayout(auth_head)
         self.authListLabel = BodyLabel("", card)
         self.authListLabel.setWordWrap(True)
         lay.addWidget(self.authListLabel)
@@ -482,13 +504,20 @@ class StressView(ScrollArea):
 
         # 最近失败原因（实时）
         self.errLabel = CaptionLabel(L("最近失败原因：—", "Last error: —"), card)
-        self.errLabel.setStyleSheet("color:#D13438; background:transparent;")
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(
+            self.errLabel,
+            "FluentLabelBase{color:#D13438;}",
+            "FluentLabelBase{color:#D13438;}")
         self.errLabel.setWordWrap(True)
         lay.addWidget(self.errLabel)
 
         # 分目标实时状态（多目标时显示每个目标的成功/失败）
         self.targetsLabel = CaptionLabel("", card)
-        self.targetsLabel.setStyleSheet("color:#0078D4; background:transparent;")
+        setCustomStyleSheet(
+            self.targetsLabel,
+            "FluentLabelBase{color:#0078D4;}",
+            "FluentLabelBase{color:#0078D4;}")
         self.targetsLabel.setWordWrap(True)
         lay.addWidget(self.targetsLabel)
 
@@ -566,6 +595,33 @@ class StressView(ScrollArea):
     def refresh_auth_list(self):
         hosts = [a["host"] for a in settings.authorized]
         self.authListLabel.setText(", ".join(hosts) if hosts else L("（暂无）", "(none)"))
+        if hasattr(self, "clearAuthBtn"):
+            self.clearAuthBtn.setEnabled(bool(hosts))
+
+    def _clear_authorizations(self):
+        """清空本机保存的目标授权记录。"""
+        if not settings.authorized:
+            return
+        box = MessageBox(
+            L("清空授权记录", "Clear Authorizations"),
+            L("将删除本机保存的全部目标授权。下次测试这些目标时需要重新确认，是否继续？",
+              "All saved target authorizations will be removed. You will need to confirm them again before the next test. Continue?"),
+            self.window())
+        if not box.exec():
+            return
+        if not settings.set("authorized", []):
+            InfoBar.error(
+                L("清空失败", "Clear Failed"),
+                L(f"授权记录无法保存：{settings.last_error}",
+                  f"Could not save authorization changes: {settings.last_error}"),
+                parent=self.window())
+            return
+        self.refresh_auth_list()
+        log.info(L("已清空全部目标授权记录", "All target authorizations cleared"))
+        InfoBar.success(
+            L("已清空", "Cleared"),
+            L("目标授权记录已删除", "Target authorizations removed"),
+            parent=self.window())
 
     def _parse_targets(self):
         """解析多行目标输入 → [(原始行, 规范化host)]，去重保序；空返回 []。"""
@@ -604,7 +660,13 @@ class StressView(ScrollArea):
                                     L(f"目标 {host} 未授权，测试已阻止", f"Target {host} not authorized; test blocked"),
                                     parent=self.window())
                     return
-                add_authorized(host, dlg.note())
+                if not add_authorized(host, dlg.note()):
+                    InfoBar.error(
+                        L("授权保存失败", "Authorization Save Failed"),
+                        L(f"无法保存目标 {host} 的授权记录：{settings.last_error}",
+                          f"Could not save authorization for {host}: {settings.last_error}"),
+                        parent=self.window())
+                    return
         self.refresh_auth_list()
 
         rate = self.rateSpin.value()
@@ -629,15 +691,19 @@ class StressView(ScrollArea):
             InfoBar.warning(L("请求头格式错误", "Invalid headers"),
                             L("请求头须为合法 JSON", "Headers must be valid JSON"), parent=self.window())
             return
+        if not isinstance(headers, dict):
+            InfoBar.warning(
+                L("请求头格式错误", "Invalid headers"),
+                L("请求头必须是 JSON 对象，例如 {\"User-Agent\": \"NetPulse\"}",
+                  "Headers must be a JSON object, for example {\"User-Agent\": \"NetPulse\"}"),
+                parent=self.window())
+            return
 
         configs = []
         for raw, host in targets:
             url = ""
             if proto in ("HTTP", "HTTPS"):
-                url = raw if raw.startswith("http") else f"{proto.lower()}://{host}"
-                default_port = 443 if proto == "HTTPS" else 80
-                if port != default_port:
-                    url += f":{port}"
+                url = build_http_url(raw, host, port, proto)
             configs.append({
                 "target": host, "port": port, "protocol": proto, "url": url,
                 "threads": self.threadSpin.value(), "duration": self.get_duration_seconds(),
@@ -653,6 +719,15 @@ class StressView(ScrollArea):
             f"Starting stress test ({len(configs)} target(s)): {hosts} threads={configs[0]['threads']} "
             f"rate={rate} duration={configs[0]['duration']}s"
         ))
+
+        # 新测试开始后旧报告不再代表当前任务，暂时禁用复制/导出；
+        # 先保留一份，以便底层引擎未能启动时恢复上一次有效报告。
+        self._previous_report = self._last_report
+        self._previous_report_text = self.reportLabel.text()
+        self._last_report = None
+        self.copyReportBtn.setEnabled(False)
+        self.exportReportBtn.setEnabled(False)
+        self.reportLabel.setText(L("测试进行中...", "Test in progress..."))
 
         # 立即切换UI状态，给用户即时反馈
         self.startBtn.setEnabled(False)
@@ -693,10 +768,19 @@ class StressView(ScrollArea):
             self.startBtn.setEnabled(True)
             self.stopBtn.setEnabled(False)
             self.statusLabel.setText(L("就绪", "Ready"))
+            if getattr(self, "_previous_report", None):
+                self._last_report = self._previous_report
+                self.reportLabel.setText(self._previous_report_text)
+                self.copyReportBtn.setEnabled(True)
+                self.exportReportBtn.setEnabled(True)
+            self._previous_report = None
+            self._previous_report_text = ""
             InfoBar.warning(L("启动失败", "Start failed"),
                             L("无法启动压测，请检查配置", "Cannot start stress test, check configuration"),
                             parent=self.window())
             return
+        self._previous_report = None
+        self._previous_report_text = ""
         # 安全超时：5秒后强制隐藏遮罩（防止异常情况下遮罩永远不消失）
         QTimer.singleShot(5000, self._hide_startup_busy)
 
@@ -726,7 +810,21 @@ class StressView(ScrollArea):
 
     def _on_engine_stopping(self):
         """引擎正在停止（等待所有 worker 退出）。"""
-        pass
+        self.statusLabel.setText(L("正在停止...", "Stopping..."))
+        self.stopBtn.setEnabled(False)
+
+    def _refresh_theme_colors(self, *_):
+        """刷新中性色与语义色，避免 qfluent 重载样式后覆盖自定义颜色。"""
+        self.mActive.set_color(_subtle_text_color())
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(
+            self.errLabel,
+            "FluentLabelBase{color:#D13438;}",
+            "FluentLabelBase{color:#D13438;}")
+        setCustomStyleSheet(
+            self.targetsLabel,
+            "FluentLabelBase{color:#0078D4;}",
+            "FluentLabelBase{color:#0078D4;}")
 
     def _on_snapshot(self, d):
         # 更新实时统计数据
@@ -805,6 +903,8 @@ class StressView(ScrollArea):
             text += "\n" + L(f"失败原因分布：{breakdown}", f"Failure reasons: {breakdown}")
         self.reportLabel.setText(text)
         self._last_report = r  # 供导出
+        self.copyReportBtn.setEnabled(True)
+        self.exportReportBtn.setEnabled(True)
         log.info(L(f"压测完成: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}",
                    f"Stress test finished: total={r['total']} success={r['success']} fail={r['fail']} errors={errors}"))
 
@@ -875,8 +975,25 @@ class StressView(ScrollArea):
                         L(f"来自插件：共 {len(targets)} 个", f"From plugin: {len(targets)} item(s)"),
                         parent=self.window())
 
+    def _copy_report_summary(self):
+        """把当前汇总报告的可读摘要复制到剪贴板。"""
+        if not getattr(self, "_last_report", None):
+            InfoBar.warning(L("暂无报告", "No report"),
+                            L("请先执行一次压测", "Run a stress test first"), parent=self.window())
+            return
+        text = self.reportLabel.text().strip()
+        if not text:
+            InfoBar.warning(L("暂无报告", "No report"),
+                            L("当前报告没有可复制的内容", "The current report has no content to copy"),
+                            parent=self.window())
+            return
+        QGuiApplication.clipboard().setText(text)
+        InfoBar.success(L("已复制", "Copied"),
+                        L("报告摘要已复制到剪贴板", "Report summary copied to clipboard"),
+                        parent=self.window(), position=InfoBarPosition.TOP, duration=2500)
+
     def _export_report(self):
-        """导出汇总报告：内置 JSON + 插件注册的导出格式。"""
+        """导出汇总报告：内置 JSON/CSV + 插件注册的导出格式。"""
         r = getattr(self, "_last_report", None)
         if not r:
             InfoBar.warning(L("暂无报告", "No report"),
@@ -884,28 +1001,31 @@ class StressView(ScrollArea):
             return
         from app.services.plugins import plugin_manager
         exporters = plugin_manager.exporters()
-        if not exporters:
-            self._do_export_report_json(r)
-            return
-        # 有插件导出器：弹菜单选择格式
+        # 内置格式始终展示；插件导出器（如有）追加在其后。
         from qfluentwidgets import RoundMenu, Action
         from qfluentwidgets import FluentIcon as FIF
         menu = RoundMenu(L("选择导出格式", "Choose format"), parent=self)
         menu.addAction(Action(FIF.SAVE, "JSON",
                               triggered=lambda _=False: self._do_export_report_json(r)))
-        menu.addSeparator()
-        for label, fn in exporters:
-            menu.addAction(Action(FIF.IOT, label,
-                                  triggered=lambda _=False, fn=fn, lb=label:
-                                  self._do_export_report_plugin(r, fn, lb)))
+        menu.addAction(Action(FIF.SAVE, "CSV",
+                              triggered=lambda _=False: self._do_export_report_csv(r)))
+        if exporters:
+            menu.addSeparator()
+            for label, fn in exporters:
+                menu.addAction(Action(FIF.IOT, label,
+                                      triggered=lambda _=False, fn=fn, lb=label:
+                                      self._do_export_report_plugin(r, fn, lb)))
         menu.exec(self.exportReportBtn.mapToGlobal(self.exportReportBtn.rect().bottomLeft()),
                   aniType="drop")
 
     def _do_export_report_json(self, r):
+        ts = _time.strftime("%Y%m%d_%H%M%S")
         path, _ = QFileDialog.getSaveFileName(self, L("导出报告", "Export report"),
-                                              "netpulse-report.json", "JSON (*.json)")
+                                              f"netpulse-report_{ts}.json", "JSON (*.json)")
         if not path:
             return
+        if not path.lower().endswith(".json"):
+            path += ".json"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(r, f, ensure_ascii=False, indent=2)
@@ -914,9 +1034,70 @@ class StressView(ScrollArea):
         except Exception as e:
             InfoBar.error(L("导出失败", "Export failed"), str(e), parent=self.window())
 
-    def _do_export_report_plugin(self, r, fn, label):
+    @staticmethod
+    def _report_csv_rows(r):
+        """把单目标/多目标报告转换为稳定列顺序的 CSV 行，并始终附带汇总行。"""
+        fields = (
+            "row_type", "target", "protocol", "duration_seconds", "total",
+            "success", "fail", "error_rate_pct", "avg_ms", "p50_ms",
+            "p90_ms", "p99_ms", "bytes_tx", "rate_limit_qps", "errors",
+        )
+
+        def make_row(data, row_type):
+            total = int(data.get("total", 0) or 0)
+            fail = int(data.get("fail", 0) or 0)
+            return {
+                "row_type": row_type,
+                "target": data.get("target", ""),
+                "protocol": data.get("protocol", ""),
+                "duration_seconds": round(float(data.get("duration", 0) or 0), 3),
+                "total": total,
+                "success": int(data.get("success", 0) or 0),
+                "fail": fail,
+                "error_rate_pct": round(fail / total * 100, 4) if total else 0.0,
+                "avg_ms": round(float(data.get("avg", 0) or 0), 3),
+                "p50_ms": round(float(data.get("p50", 0) or 0), 3),
+                "p90_ms": round(float(data.get("p90", 0) or 0), 3),
+                "p99_ms": round(float(data.get("p99", 0) or 0), 3),
+                "bytes_tx": int(data.get("bytes_tx", 0) or 0),
+                "rate_limit_qps": int(data.get("rate_limit", 0) or 0),
+                "errors": json.dumps(data.get("errors") or {}, ensure_ascii=False, sort_keys=True),
+            }
+
+        targets = r.get("targets") or []
+        # 兼容旧版/插件生成的单目标报告：缺少 targets 时由汇总字段合成目标行。
+        if not targets:
+            targets = [r]
+        rows = [make_row(t, "target") for t in targets]
+        summary = make_row(r, "summary")
+        summary["target"] = "ALL"
+        rows.append(summary)
+        return fields, rows
+
+    def _do_export_report_csv(self, r):
+        ts = _time.strftime("%Y%m%d_%H%M%S")
         path, _ = QFileDialog.getSaveFileName(self, L("导出报告", "Export report"),
-                                              "netpulse-report", L("所有文件 (*.*)", "All files (*.*)"))
+                                              f"netpulse-report_{ts}.csv", "CSV (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            fields, rows = self._report_csv_rows(r)
+            # UTF-8 BOM 方便 Excel 直接识别中文目标与错误原因；newline="" 避免 Windows 空行。
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+            InfoBar.success(L("导出成功", "Exported"), path, parent=self.window())
+            log.info(L(f"报告已导出(CSV): {path}", f"Report exported (CSV): {path}"))
+        except Exception as e:
+            InfoBar.error(L("导出失败", "Export failed"), str(e), parent=self.window())
+
+    def _do_export_report_plugin(self, r, fn, label):
+        ts = _time.strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(self, L("导出报告", "Export report"),
+                                              f"netpulse-report_{ts}", L("所有文件 (*.*)", "All files (*.*)"))
         if not path:
             return
         try:

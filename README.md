@@ -25,7 +25,7 @@ NetPulse is a Windows desktop application for network stress testing and perform
 | 🤝 **Collaborative Test** | Host / node modes, one-click invite code copy, IPv4+IPv6 dual-stack listening, UPnP automatic port mapping (Internet collaboration supported) |
 | 🧩 **Plugin System** | Full plugin platform: local plugin management (enable/disable/reload), **built-in plugin marketplace**, one-click install & update, custom icons, and **one-click publish/unpublish to GitHub** — no manual token required |
 | 📈 **Monitoring** | Real-time CPU / memory / network speed curves, smooth wheel zoom, double-click to resume live scrolling |
-| ⚙️ **Settings** | Dark / light theme, instant Chinese-English switching, default parameters, audit log export |
+| ⚙️ **Settings** | Dark / light theme, Chinese-English language selection (restart to fully apply), default parameters, audit log export |
 
 ### Security & Compliance
 
@@ -45,7 +45,7 @@ NetPulse v1.1.0 ships with a full plugin platform — extend the app with your o
 - **One-click Unpublish**: plugin authors can remove their own listings at any time
 - **Custom Icons**: plugin authors can upload a PNG/JPG icon (also supports built-in Fluent icons); auto-generated colored initial badge as fallback
 - **Rich Plugin API**: register custom protocols, exporters, target providers and metrics subscriptions; respond to test lifecycle events
-- **Sandboxed loading**: plugin crashes never take down the host app
+- **Guarded lifecycle**: plugin load/page errors are logged and isolated where possible; plugins still run in-process and must be trusted
 
 Check the built-in `example_hello.py` / `example_dns.py` plugins in the plugin folder for API usage examples. **Want to write your own?** See the [**Plugin Development Guide**](PLUGINS.md) — a minimal plugin is about 10 lines of Python.
 
@@ -73,13 +73,13 @@ pyinstaller --name NetPulse --icon app.ico --windowed --onefile --add-data "app.
 
 # 2. Create the installer (requires Inno Setup 7)
 ISCC.exe installer.iss
-# Output: installer/NetPulse-Setup-1.0.0.exe
+# Output: installer/NetPulse-Setup-1.1.5.exe
 ```
 
 ### Tech Stack
 
 - **UI**: PySide6 + QFluentWidgets (Fluent Design)
-- **Charts**: pyqtgraph (high-performance real-time curves)
+- **Charts**: PySide6 QtCharts (native real-time curves)
 - **System monitoring**: psutil
 - **Networking**: requests / socket / icmplib
 - **Rate limiting**: custom token-bucket algorithm
@@ -105,7 +105,7 @@ NetPulse 是一款 Windows 桌面端的网络压力测试与性能监控工具�
 | 🤝 **协同测试** | 主控邀请 / 节点加入模式，邀请码一键复制，IPv4+IPv6 双栈监听，UPnP 自动端口映射（支持外网协同） |
 | 🧩 **插件系统** | 完整插件平台：本地插件管理（启用/禁用/重载）、**内置插件市场**、一键安装与更新、自定义图标、**一键发布/下架到 GitHub** —— 无需手动生成令牌 |
 | 📈 **性能监控** | CPU / 内存 / 网速实时曲线，鼠标滚轮平滑缩放，双击恢复实时滚动 |
-| ⚙️ **设置** | 深色 / 浅色主题，中英双语即时切换，默认参数配置，审计日志导出 |
+| ⚙️ **设置** | 深色 / 浅色主题，中英双语选择（重启后完整生效），默认参数配置，审计日志导出 |
 
 ### 安全与合规设计
 
@@ -125,7 +125,7 @@ NetPulse v1.1.0 内置完整插件平台，可以自由扩展功能：
 - **一键下架**：插件作者可随时下架自己发布的插件
 - **自定义图标**：发布时可上传 PNG/JPG 图标（也支持内置 Fluent 图标）；未上传时自动生成彩色首字徽章
 - **丰富的插件 API**：注册自定义协议、导出器、目标源和指标订阅；响应测试生命周期事件
-- **沙箱加载**：插件崩溃不会拖垮主程序
+- **受保护生命周期**：插件加载/页面错误会尽量隔离并记录；插件仍在进程内运行，仅应安装可信插件
 
 插件目录内置 `example_hello.py` / `example_dns.py` 示例插件，可参考其 API 用法。**想自己写一个？** 看 [**插件开发指南**](PLUGINS.md) —— 最小插件只要 10 行 Python。
 
@@ -153,13 +153,13 @@ pyinstaller --name NetPulse --icon app.ico --windowed --onefile --add-data "app.
 
 # 2. 制作安装程序（需安装 Inno Setup 7）
 ISCC.exe installer.iss
-# 产物位于 installer/NetPulse-Setup-1.0.0.exe
+# 产物位于 installer/NetPulse-Setup-1.1.5.exe
 ```
 
 ### 技术栈
 
 - **界面**：PySide6 + QFluentWidgets（Fluent Design）
-- **图表**：pyqtgraph（实时高性能曲线）
+- **图表**：PySide6 QtCharts（原生实时曲线）
 - **系统监控**：psutil
 - **网络**：requests / socket / icmplib
 - **限速**：自研令牌桶算法

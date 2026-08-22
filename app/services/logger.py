@@ -43,11 +43,26 @@ class AuditLog:
         self._log(logging.ERROR, msg)
 
     def export_text(self, path):
+        """导出当前日期的完整磁盘日志，而不是仅导出本次进程的内存缓存。"""
         with self._lock:
-            lines = [f"{t} [{lv}] {m}" for t, lv, m in list(self.entries)]
+            for handler in self._logger.handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
+            try:
+                with open(self.file_path, "r", encoding="utf-8") as src:
+                    data = src.read()
+            except OSError:
+                lines = [f"{t} [{lv}] {m}" for t, lv, m in list(self.entries)]
+                data = "\n".join(lines)
+
+        # 用户若恰好选择了当前日志文件本身，不要用写模式把源文件截断。
+        if os.path.abspath(path) == os.path.abspath(self.file_path):
+            return len(data.splitlines())
         with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        return len(lines)
+            f.write(data)
+        return len(data.splitlines())
 
 
 log = AuditLog()

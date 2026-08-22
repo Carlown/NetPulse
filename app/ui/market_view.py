@@ -13,31 +13,56 @@ import json
 import os
 import shutil
 import threading
+import unicodedata
 
 import requests
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout,
-                               QLabel, QStackedWidget, QVBoxLayout,
-                               QWidget)
+from PySide6.QtCore import (QEvent, QEasingCurve, QPoint, QPropertyAnimation,
+                            QRect, Qt, QTimer, QUrl, Signal)
+from PySide6.QtGui import (QColor, QDesktopServices, QKeySequence, QPixmap,
+                           QShortcut)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout,
+                               QHBoxLayout, QLabel, QLayout, QStackedWidget,
+                               QVBoxLayout, QWidget)
 from qfluentwidgets import (Action, BodyLabel, CaptionLabel, ComboBox,
                             FluentIcon as FIF, IconWidget,
                             IndeterminateProgressRing, InfoBar, isDarkTheme,
-                            MessageBox, MessageBoxBase, Pivot,
+                            LineEditButton, MessageBox, MessageBoxBase, Pivot,
                             PrimaryPushButton, PushButton, RoundMenu,
                             ScrollArea, SearchLineEdit, SimpleCardWidget,
                             StrongBodyLabel, SubtitleLabel, SwitchButton,
-                            TextEdit, ToolButton, TransparentDropDownToolButton)
+                            TextEdit, ToolButton, TransparentDropDownToolButton,
+                            qconfig)
 
 from app.services.market import (INDEX_EDIT_URL, MarketClient,
                                  GITHUB_OAUTH_CLIENT_ID, device_flow_start,
-                                 device_flow_poll)
+                                 device_flow_poll, is_valid_market_plugin_id)
 from app.services.plugins import _i18n_text, plugin_manager, plugins_dir
 from app.services.settings import settings
 from app.ui.i18n import L
 
 _ICON_SIZE = 40
 _MAX_ICON_BYTES = 64 * 1024
+
+
+class _SearchSuggestCard(SimpleCardWidget):
+    """带真实透明圆角、可适配深浅主题的搜索悬浮卡片。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setBorderRadius(10)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        self.setBackgroundColor(self._normalBackgroundColor())
+
+    def _normalBackgroundColor(self):
+        return QColor(45, 45, 45, 250) if isDarkTheme() \
+            else QColor(250, 250, 250, 252)
+
+    def _hoverBackgroundColor(self):
+        return self._normalBackgroundColor()
+
+    def _pressedBackgroundColor(self):
+        return self._normalBackgroundColor()
 
 # 插件分类：JSON 里的 category 值 -> (中文, English)
 _PLUGIN_CATEGORIES = (
@@ -62,6 +87,11 @@ def _entry_category(entry: dict) -> str:
     return v if any(k == v for k, _ in _PLUGIN_CATEGORIES) else "other"
 
 
+def _normalize_search_text(value) -> str:
+    """统一全半角、大小写和 Unicode 组合形式，便于多语言搜索。"""
+    return unicodedata.normalize("NFKC", str(value or "")).casefold()
+
+
 # 无图标插件的默认底色池（按插件 ID 稳定选取，同插件颜色不变）
 _FALLBACK_COLORS = ("#E81123", "#F7630C", "#CA500F", "#FFB900",
                     "#107C10", "#038387", "#0078D4", "#8764B8", "#C239B3")
@@ -74,6 +104,21 @@ def _fallback_color(entry: dict) -> str:
     for ch in key:
         n = (n * 31 + ord(ch)) & 0xFFFFFFFF
     return _FALLBACK_COLORS[n % len(_FALLBACK_COLORS)]
+
+
+def _contrast_text_color(background: str) -> str:
+    """按相对亮度选择对比度更高的深色或白色文字。"""
+    color = QColor(background)
+    channels = []
+    for value in (color.redF(), color.greenF(), color.blueF()):
+        channels.append(value / 12.92 if value <= 0.04045
+                        else ((value + 0.055) / 1.055) ** 2.4)
+    luminance = (
+        0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    )
+    dark_contrast = (luminance + 0.05) / 0.05
+    light_contrast = 1.05 / (luminance + 0.05)
+    return "#111111" if dark_contrast >= light_contrast else "#FFFFFF"
 
 # GitHub 一键发布相关常量
 _REPO_OWNER = "Carlown"
@@ -272,13 +317,34 @@ def gh_ensure_workflow(token):
 
 
 def decode_data_uri_icon(v: str):
-    if not isinstance(v, str) or not v.startswith("data:"):
+    """解析不超过 64 KiB 的图片 data URI；非法内容返回 None。"""
+    if not isinstance(v, str) or not v.startswith("data:image/") or "," not in v:
         return None
     try:
         b64 = v.split(",", 1)[1]
-        return base64.b64decode(b64)
+        if len(b64) > ((_MAX_ICON_BYTES + 2) // 3) * 4 + 8:
+            return None
+        data = base64.b64decode(b64, validate=True)
+        return data if len(data) <= _MAX_ICON_BYTES else None
     except Exception:
         return None
+
+
+def _download_icon_bytes(url: str):
+    """下载不超过 64 KiB 的图标，避免远程大文件占用过量内存。"""
+    with requests.get(url, timeout=8, stream=True) as r:
+        r.raise_for_status()
+        size_header = int(r.headers.get("Content-Length", 0) or 0)
+        if size_header > _MAX_ICON_BYTES:
+            raise ValueError("icon exceeds 64 KiB limit")
+        data = bytearray()
+        for chunk in r.iter_content(8192):
+            if not chunk:
+                continue
+            data.extend(chunk)
+            if len(data) > _MAX_ICON_BYTES:
+                raise ValueError("icon exceeds 64 KiB limit")
+        return bytes(data)
 
 
 def load_icon_async(icon_field, callback):
@@ -289,9 +355,7 @@ def load_icon_async(icon_field, callback):
     if isinstance(icon_field, str) and icon_field.startswith(("http://", "https://")):
         def _work():
             try:
-                r = requests.get(icon_field, timeout=8)
-                r.raise_for_status()
-                data = r.content
+                data = _download_icon_bytes(icon_field)
                 QTimer.singleShot(0, lambda: callback(data))
             except Exception:
                 pass
@@ -323,7 +387,7 @@ class PluginIconLabel(QLabel):
         ch = (str(name)[:1] or "?").upper()
         self.setText(ch)
         self.setStyleSheet(
-            f"color:white; font-size:18px; font-weight:600;"
+            f"color:#FFFFFF; font-size:18px; font-weight:600;"
             f"background:{color}; border-radius:6px;")
 
 
@@ -340,10 +404,20 @@ class MarketCard(SimpleCardWidget):
 
         col = QVBoxLayout()
         col.setSpacing(2)
-        col.addWidget(StrongBodyLabel(
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addWidget(StrongBodyLabel(
             f"{self._txt(entry.get('name'))}  v{entry.get('version', '?')}", self))
+        title_row.addStretch(1)
+        self.favoriteBtn = ToolButton(FIF.HEART, self)
+        self.favoriteBtn.setFixedSize(30, 30)
+        self.favoriteBtn.clicked.connect(self._toggle_favorite)
+        title_row.addWidget(self.favoriteBtn)
+        col.addLayout(title_row)
+        category = _i18n_text(_category_label(_entry_category(entry)))
         meta = " · ".join(str(x) for x in
-                          (entry.get("author"), self._txt(entry.get("description"))) if x)
+                          (category, entry.get("date"), entry.get("author"),
+                           self._txt(entry.get("description"))) if x)
         dlab = CaptionLabel(meta, self)
         dlab.setWordWrap(True)
         col.addWidget(dlab)
@@ -360,12 +434,22 @@ class MarketCard(SimpleCardWidget):
         btn_col.addWidget(self.btn)
         self.unpubBtn = PushButton(L("下架", "Unpublish"), btn_wrap)
         self.unpubBtn.setFixedWidth(96)
-        self.unpubBtn.setStyleSheet("PushButton{color:#e81123;}")
+        self._refresh_unpublish_style()
+        qconfig.themeChanged.connect(self._refresh_unpublish_style)
         self.unpubBtn.clicked.connect(self._unpublish)
         btn_col.addWidget(self.unpubBtn)
         btn_col.addStretch(1)
         lay.addWidget(btn_wrap, 0, Qt.AlignVCenter)
         self.refresh_state()
+        self.refresh_favorite()
+
+    def _refresh_unpublish_style(self, *_):
+        """主题重载后恢复“下架”按钮的危险操作语义色。"""
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(
+            self.unpubBtn,
+            "PushButton{color:#e81123;}",
+            "PushButton{color:#e81123;}")
 
     @staticmethod
     def _txt(v):
@@ -387,6 +471,24 @@ class MarketCard(SimpleCardWidget):
         else:
             self.btn.setText(L("安装", "Install"))
             self.btn.setEnabled(True)
+
+    def refresh_favorite(self):
+        pid = str(self.entry.get("id", ""))
+        favorite = self.view.is_favorite(pid)
+        self.favoriteBtn.setIcon(
+            FIF.HEART.icon(QColor("#E81123")) if favorite else FIF.HEART)
+        self.favoriteBtn.setToolTip(
+            L("取消收藏", "Remove from favorites") if favorite
+            else L("收藏插件", "Add to favorites"))
+        self.favoriteBtn.setAccessibleName(
+            L(f"取消收藏：{self._txt(self.entry.get('name'))}",
+              f"Remove from favorites: {self._txt(self.entry.get('name'))}")
+            if favorite else
+            L(f"收藏：{self._txt(self.entry.get('name'))}",
+              f"Add to favorites: {self._txt(self.entry.get('name'))}"))
+
+    def _toggle_favorite(self):
+        self.view.toggle_favorite(str(self.entry.get("id", "")))
 
     def _install(self):
         # 已安装但被禁用：直接启用，无需重新下载
@@ -587,9 +689,10 @@ class LocalPluginRow(QWidget):
         name = _i18n_text(rec.display_name)
         ch = (str(name)[:1] or "?").upper()
         label.setText(ch)
+        bg = _fallback_color({"id": rec.pid})
         label.setStyleSheet(
-            f"color:white; font-size:16px; font-weight:600;"
-            f"background:{_fallback_color({'id': rec.pid})};"
+            f"color:#FFFFFF; font-size:16px; font-weight:600;"
+            f"background:{bg};"
             f" border-radius:6px;")
 
     def _reload(self, pid):
@@ -740,6 +843,9 @@ class LocalPluginsPage(QWidget):
 class PluginMarketPage(QWidget):
     """插件市场浏览页。"""
 
+    _MAX_SEARCH_HISTORY = 5
+    _MAX_HOT_SEARCHES = 5
+
     # 跨线程信号：下架流程
     unpubAuthNeeded = Signal(str, str)       # code, uri（设备授权时浏览器打开）
     unpubAuthOk = Signal(object, str, object)  # entry, token, card
@@ -763,8 +869,32 @@ class PluginMarketPage(QWidget):
         self.searchEdit = SearchLineEdit(self)
         self.searchEdit.setPlaceholderText(L("搜索插件名称、作者、描述…",
                                              "Search by name, author, description…"))
+        self.searchEdit.setAccessibleName(L("搜索插件", "Search plugins"))
         self.searchEdit.setClearButtonEnabled(True)
-        self.searchEdit.textChanged.connect(self._apply_filter)
+        # 搜索框内下拉箭头：放在放大镜按钮正左侧。
+        self.searchDropDownBtn = LineEditButton(FIF.DOWN, self.searchEdit)
+        self.searchDropDownBtn.setFixedSize(29, 25)
+        search_btn_index = self.searchEdit.hBoxLayout.indexOf(
+            self.searchEdit.searchButton)
+        self.searchEdit.hBoxLayout.insertWidget(
+            search_btn_index, self.searchDropDownBtn, 0, Qt.AlignRight)
+        self.searchEdit.setTextMargins(0, 0, 89, 0)
+        self.searchDropDownBtn.setToolTip(
+            L("展开搜索推荐", "Show search suggestions"))
+        self.searchDropDownBtn.setAccessibleName(
+            L("展开搜索推荐", "Show search suggestions"))
+        # 在按下时只切换一次；不能等 release 后的 clicked，否则 Windows
+        # 顶层 Tool 窗口先隐藏、按钮松开又会把面板重新展开。
+        self.searchDropDownBtn.pressed.connect(self._toggle_search_suggestions)
+        self._search_commit_timer = QTimer(self)
+        self._search_commit_timer.setSingleShot(True)
+        self._search_commit_timer.setInterval(650)
+        self._search_commit_timer.timeout.connect(self._commit_pending_search)
+        self.searchEdit.textChanged.connect(self._on_search_text_changed)
+        self.searchEdit.searchSignal.connect(self._submit_search)
+        self.searchEdit.installEventFilter(self)
+        self.searchShortcut = QShortcut(QKeySequence.Find, self)
+        self.searchShortcut.activated.connect(self._focus_search)
         topbar.addWidget(self.searchEdit, 1)
 
         # 筛选按钮：按类型筛选
@@ -772,8 +902,10 @@ class PluginMarketPage(QWidget):
         # 而 RoundMenu 不是 QMenu，菜单弹不出来；必须用 DropDown 系列（自带
         # setMenu(RoundMenu) + 点击弹出逻辑）。
         self._filter_cat = "all"
+        self._favorites_only = False
         self.filterBtn = TransparentDropDownToolButton(FIF.FILTER, self)
-        self.filterBtn.setToolTip(L("筛选类型", "Filter by type"))
+        self.filterBtn.setToolTip(L("筛选类型和安装状态",
+                                    "Filter by type and install status"))
         self.filterMenu = RoundMenu(parent=self)
         self._filter_actions = []
         filter_items = [("all", ("全部", "All"))] + list(_PLUGIN_CATEGORIES)
@@ -783,6 +915,31 @@ class PluginMarketPage(QWidget):
             act.triggered.connect(lambda _c, k=key: self._set_filter_cat(k))
             self.filterMenu.addAction(act)
             self._filter_actions.append((act, key))
+        self.filterMenu.addSeparator()
+        self._filter_state = "all"
+        self._filter_state_actions = []
+        state_items = (
+            ("all", ("全部状态", "All states")),
+            ("absent", ("未安装", "Not installed")),
+            ("same", ("已安装", "Installed")),
+            ("update", ("可更新", "Updates available")),
+            ("disabled", ("已禁用", "Disabled")),
+        )
+        for key, label in state_items:
+            act = Action(_i18n_text(label), checkable=True, parent=self)
+            act.setChecked(key == "all")
+            act.triggered.connect(lambda _c, k=key: self._set_filter_state(k))
+            self.filterMenu.addAction(act)
+            self._filter_state_actions.append((act, key))
+        self.filterMenu.addSeparator()
+        self.favoriteFilterAction = Action(
+            L("仅看收藏", "Favorites only"), checkable=True, parent=self)
+        self.favoriteFilterAction.triggered.connect(self._set_favorites_only)
+        self.filterMenu.addAction(self.favoriteFilterAction)
+        self.resetFilterAction = Action(
+            L("清除全部筛选", "Clear all filters"), parent=self)
+        self.resetFilterAction.triggered.connect(self._reset_market_filters)
+        self.filterMenu.addAction(self.resetFilterAction)
         self.filterBtn.setMenu(self.filterMenu)
         topbar.addWidget(self.filterBtn)
 
@@ -790,7 +947,8 @@ class PluginMarketPage(QWidget):
         self._sort_desc = True
         self.sortCombo = ComboBox(self)
         self.sortCombo.addItems([L("按时间", "Time"), L("按名称", "Name"),
-                                 L("按作者", "Author"), L("按版本", "Version")])
+                                 L("按作者", "Author"), L("按版本", "Version"),
+                                 L("按状态", "Status")])
         self.sortCombo.setCurrentIndex(0)
         self.sortCombo.currentIndexChanged.connect(lambda _i: self._resort())
         self.sortDirBtn = ToolButton(FIF.DOWN, self)
@@ -806,6 +964,136 @@ class PluginMarketPage(QWidget):
         self.refreshBtn.clicked.connect(self._load)
         topbar.addWidget(self.refreshBtn)
         root.addLayout(topbar)
+
+        # 点击搜索框后出现的热门搜索 / 搜索历史面板。
+        self._hot_searches = []
+        saved_favorites = settings.plugin_market_favorites
+        self._favorite_ids = {
+            str(x).strip() for x in saved_favorites if str(x).strip()
+        } if isinstance(saved_favorites, list) else set()
+        saved_history = settings.plugin_market_search_history
+        self._search_history = []
+        seen_history = set()
+        if isinstance(saved_history, list):
+            for value in saved_history:
+                term = str(value or "").strip()[:100]
+                folded = _normalize_search_text(term)
+                if term and folded not in seen_history:
+                    self._search_history.append(term)
+                    seen_history.add(folded)
+                if len(self._search_history) >= self._MAX_SEARCH_HISTORY:
+                    break
+        self._suggestions_open = False
+        self._height_animations = {}
+        self._deactivate_check_pending = False
+        self.searchSuggestPanel = _SearchSuggestCard(self)
+        self.searchSuggestPanel.installEventFilter(self)
+        suggest_lay = QVBoxLayout(self.searchSuggestPanel)
+        # 顶层窗口的默认布局约束会把 minimumHeight 锁到 sizeHint，导致
+        # geometry 动画只能在结束时瞬间隐藏；允许窗口真正收缩到 0。
+        suggest_lay.setSizeConstraint(QLayout.SetNoConstraint)
+        self.searchSuggestPanel.setMinimumHeight(0)
+        suggest_lay.setContentsMargins(16, 12, 16, 12)
+        suggest_lay.setSpacing(8)
+
+        hot_head = QHBoxLayout()
+        hot_head.setContentsMargins(0, 0, 0, 0)
+        self.hotTitle = StrongBodyLabel(L("热门搜索", "Popular searches"),
+                                        self.searchSuggestPanel)
+        hot_head.addWidget(self.hotTitle)
+        hot_head.addStretch(1)
+        suggest_lay.addLayout(hot_head)
+        self.hotHost = QWidget(self.searchSuggestPanel)
+        hot_lay = QVBoxLayout(self.hotHost)
+        hot_lay.setContentsMargins(0, 0, 0, 0)
+        hot_lay.setSpacing(6)
+        self._hot_buttons = []
+        rank_colors = ("#E53935", "#F6B73C", "#4F86F7", "#7F8C9A", "#666666")
+        for rank, color in enumerate(rank_colors, 1):
+            btn = PushButton("", self.hotHost)
+            btn.setMinimumHeight(38)
+            btn_lay = QHBoxLayout(btn)
+            btn_lay.setContentsMargins(8, 4, 8, 4)
+            btn_lay.setSpacing(8)
+            rank_label = QLabel(str(rank), btn)
+            rank_label.setAlignment(Qt.AlignCenter)
+            rank_label.setFixedSize(26, 26)
+            rank_label.setStyleSheet(
+                f"background: {color}; color: {_contrast_text_color(color)}; "
+                "border-radius: 13px; "
+                "font-size: 13px; font-weight: 700;")
+            rank_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            btn_lay.addWidget(rank_label)
+            term_label = QLabel("", btn)
+            term_label.setAlignment(Qt.AlignCenter)
+            term_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            btn_lay.addWidget(term_label, 1)
+            # 与左侧排名等宽，让插件名称保持视觉居中。
+            right_spacer = QWidget(btn)
+            right_spacer.setFixedWidth(26)
+            right_spacer.setAttribute(Qt.WA_TransparentForMouseEvents)
+            btn_lay.addWidget(right_spacer)
+            btn.clicked.connect(
+                lambda _checked=False, b=btn: self._use_search_term(
+                    b.property("searchTerm")))
+            hot_lay.addWidget(btn)
+            self._hot_buttons.append((btn, rank_label, term_label))
+        suggest_lay.addWidget(self.hotHost)
+
+        history_head = QHBoxLayout()
+        history_head.setContentsMargins(0, 2, 0, 0)
+        self.historyTitle = StrongBodyLabel(L("搜索历史", "Search history"),
+                                            self.searchSuggestPanel)
+        history_head.addWidget(self.historyTitle)
+        history_head.addStretch(1)
+        self.historyClearBtn = PushButton(L("全部清空", "Clear all"),
+                                          self.searchSuggestPanel)
+        self.historyClearBtn.setAccessibleName(
+            L("清空全部搜索历史", "Clear all search history"))
+        self.historyClearBtn.clicked.connect(self._clear_search_history)
+        history_head.addWidget(self.historyClearBtn)
+        suggest_lay.addLayout(history_head)
+
+        self.historyHost = QWidget(self.searchSuggestPanel)
+        self.historyLay = QGridLayout(self.historyHost)
+        self.historyLay.setContentsMargins(0, 0, 0, 0)
+        self.historyLay.setHorizontalSpacing(6)
+        self.historyLay.setVerticalSpacing(6)
+        for column in range(3):
+            self.historyLay.setColumnStretch(column, 1)
+        self.historyEmpty = CaptionLabel(
+            L("暂无推荐，可直接输入关键词搜索",
+              "No suggestions yet; type a keyword to search"),
+            self.historyHost)
+        self.historyLay.addWidget(self.historyEmpty, 0, 0, 1, 3)
+        self._history_rows = []
+        for _i in range(self._MAX_SEARCH_HISTORY):
+            row = QWidget(self.historyHost)
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(4)
+            term_btn = PushButton("", row)
+            term_btn.setMinimumHeight(34)
+            term_btn.clicked.connect(
+                lambda _checked=False, b=term_btn: self._use_search_term(
+                    b.property("searchTerm")))
+            row_lay.addWidget(term_btn, 1)
+            delete_btn = ToolButton(FIF.DELETE, row)
+            delete_btn.setToolTip(L("删除这条历史", "Delete this search"))
+            delete_btn.clicked.connect(
+                lambda _checked=False, b=delete_btn: self._delete_search_term(
+                    b.property("searchTerm")))
+            row_lay.addWidget(delete_btn)
+            self.historyLay.addWidget(row, 1 + _i // 3, _i % 3)
+            self._history_rows.append((row, term_btn, delete_btn))
+        suggest_lay.addWidget(self.historyHost)
+        self._refresh_search_suggestions()
+        self.searchSuggestPanel.hide()
+        QTimer.singleShot(0, self._sync_search_suggest_width)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        qconfig.themeChanged.connect(self._on_search_theme_changed)
 
         self.statusLabel = CaptionLabel(L("正在加载市场…", "Loading marketplace…"), self)
         root.addWidget(self.statusLabel)
@@ -827,6 +1115,9 @@ class PluginMarketPage(QWidget):
         self.client.download_failed.connect(self._on_download_failed)
         plugin_manager.changed.connect(lambda: QTimer.singleShot(0, self._refresh_buttons))
         self._all_cards = []
+        self._last_visible_count = 0
+        self._market_source_suffix = ""
+        self._incompatible_count = 0
         self._load()
 
     def _load(self):
@@ -846,21 +1137,396 @@ class PluginMarketPage(QWidget):
         from app.services.updater import APP_VERSION, _ver_tuple
         self.spinner.hide()
         self._all_cards = []
+        self._incompatible_count = 0
         for e in entries:
             minv = str(e.get("min_app", ""))
             if minv and _ver_tuple(minv) > _ver_tuple(APP_VERSION):
+                self._incompatible_count += 1
                 continue
             card = MarketCard(e, self)
             self.listLay.insertWidget(self.listLay.count() - 1, card)
             self._all_cards.append(card)
-        src = L("（离线缓存）", " (offline cache)") if from_cache else ""
-        total = len(self._all_cards)
-        if total:
-            self.statusLabel.setText(L(f"共 {total} 个插件{src}", f"{total} plugin(s){src}"))
-        else:
-            self.statusLabel.setText(L(
-                f"暂无可安装的插件{src}", f"No installable plugins{src}"))
+        self._market_source_suffix = (
+            L("（离线缓存）", " (offline cache)") if from_cache else "")
+        self._update_hot_searches(entries)
+        self._update_filter_counts()
         self._resort()
+        self._apply_filter(self.searchEdit.text())
+
+    def eventFilter(self, watched, event):
+        """处理下拉生命周期、外部点击、键盘和窗口位置变化。"""
+        if watched is self.searchSuggestPanel and event.type() == QEvent.Hide:
+            self._suggestions_open = False
+            self.searchDropDownBtn.setIcon(FIF.DOWN)
+            self.searchDropDownBtn.setToolTip(
+                L("展开搜索推荐", "Show search suggestions"))
+            self.searchDropDownBtn.setAccessibleName(
+                L("展开搜索推荐", "Show search suggestions"))
+
+        if event.type() == QEvent.ApplicationDeactivate:
+            # Windows 上非激活 Tool 窗口与主窗口切换时也可能短暂发出该事件。
+            # 立即隐藏会发生“箭头点击先隐藏、clicked 随后又重新展开”的竞争，
+            # 因而延迟到收起动画结束后再确认应用是否真的失去激活。
+            self._schedule_application_deactivate_check()
+        elif watched is self and event.type() in (QEvent.Hide, QEvent.Close):
+            self._force_hide_search_suggestions()
+            self._search_commit_timer.stop()
+        elif (self._suggestions_open and event.type() == QEvent.MouseButtonPress
+              # 原生 Windows 输入会先把同一次点击发给 QWindow/页面顶层，
+              # 随后才发给真正的按钮，不能只根据 watched 判断内外区域。
+              and not self._is_search_popup_event(watched, event)):
+            self._hide_search_suggestions()
+        elif (self._suggestions_open and event.type() == QEvent.KeyPress
+              and event.key() == Qt.Key_Escape):
+            self._hide_search_suggestions()
+            self.searchEdit.setFocus()
+            return True
+        elif (self._suggestions_open and event.type() in (QEvent.Move, QEvent.Resize)
+              and watched is self.window()):
+            QTimer.singleShot(0, self._resize_open_search_suggestions)
+
+        if watched is self.searchEdit:
+            if event.type() == QEvent.Resize:
+                QTimer.singleShot(0, self._sync_search_suggest_width)
+            elif (event.type() == QEvent.MouseButtonPress
+                  and event.button() == Qt.LeftButton):
+                self._show_search_suggestions()
+            elif event.type() == QEvent.KeyPress and event.key() == Qt.Key_Down:
+                self._show_search_suggestions()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _is_search_popup_widget(self, watched):
+        """判断事件对象是否属于搜索框或它的悬浮下拉层。"""
+        widget = watched if isinstance(watched, QWidget) else None
+        while widget is not None:
+            if widget in (self.searchEdit, self.searchSuggestPanel):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def _is_search_popup_event(self, watched, event):
+        """按事件对象和全局命中控件共同判断点击是否位于搜索区域。"""
+        if self._is_search_popup_widget(watched):
+            return True
+        global_position = getattr(event, "globalPosition", None)
+        if callable(global_position):
+            point = global_position().toPoint()
+            # Windows 的透明/Mica 窗口上 widgetAt() 可能返回 None，先直接
+            # 比较真实全局矩形，确保箭头和悬浮层内所有按钮都能收到点击。
+            for widget in (self.searchEdit, self.searchSuggestPanel):
+                if widget.isVisible():
+                    top_left = widget.mapToGlobal(QPoint(0, 0))
+                    if QRect(top_left, widget.size()).contains(point):
+                        return True
+            hit = QApplication.widgetAt(point)
+            if self._is_search_popup_widget(hit):
+                return True
+        return False
+
+    def _sync_search_suggest_width(self):
+        """悬浮面板与搜索框等宽，并始终贴在搜索框下沿。"""
+        width = self.searchEdit.width()
+        if width > 0:
+            self.searchSuggestPanel.setFixedWidth(width)
+            if self.searchSuggestPanel.isVisible():
+                QTimer.singleShot(0, self._resize_open_search_suggestions)
+
+    def _popup_geometries(self, requested_height):
+        """计算页面内的展开/收起位置；下方不足时自动向上展开。"""
+        top_left = self.searchEdit.mapTo(self, QPoint(0, 0))
+        bottom_left = self.searchEdit.mapTo(
+            self,
+            QPoint(0, self.searchEdit.height()))
+        available = self.rect()
+        gap = 4
+        width = min(self.searchEdit.width(), available.width())
+        x = max(available.left(), min(top_left.x(),
+                                     available.right() - width + 1))
+        below = max(0, available.bottom() - bottom_left.y() - gap + 1)
+        above = max(0, top_left.y() - available.top() - gap)
+        open_upward = below < requested_height and above > below
+        room = above if open_upward else below
+        height = max(1, min(int(requested_height), max(1, room)))
+        if open_upward:
+            collapsed = QRect(x, top_left.y() - gap, width, 0)
+            expanded = QRect(x, top_left.y() - gap - height, width, height)
+        else:
+            collapsed = QRect(x, bottom_left.y() + gap, width, 0)
+            expanded = QRect(x, bottom_left.y() + gap, width, height)
+        return collapsed, expanded
+
+    def _animate_panel_geometry(self, start, end, finished=None):
+        """悬浮下拉层的滑入/滑出动画。"""
+        old = self._height_animations.pop("panel", None)
+        if old is not None:
+            old.stop()
+        animation = QPropertyAnimation(
+            self.searchSuggestPanel, b"geometry", self)
+        animation.setDuration(180)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._height_animations["panel"] = animation
+
+        def _done():
+            if self._height_animations.get("panel") is not animation:
+                return
+            self._height_animations.pop("panel", None)
+            if finished is not None:
+                finished()
+
+        animation.finished.connect(_done)
+        animation.start()
+
+    def _show_search_suggestions(self):
+        """从搜索框下沿滑出悬浮的热门搜索或搜索历史。"""
+        self._refresh_search_suggestions()
+        self.searchSuggestPanel.setBackgroundColor(
+            self.searchSuggestPanel._normalBackgroundColor())
+        self._sync_search_suggest_width()
+        if self._suggestions_open and self.searchSuggestPanel.isVisible():
+            return
+        self._suggestions_open = True
+        self.searchDropDownBtn.setIcon(FIF.UP)
+        self.searchDropDownBtn.setToolTip(
+            L("收起搜索推荐", "Hide search suggestions"))
+        self.searchDropDownBtn.setAccessibleName(
+            L("收起搜索推荐", "Hide search suggestions"))
+        collapsed, end = self._popup_geometries(
+            self.searchSuggestPanel.sizeHint().height())
+        start = (self.searchSuggestPanel.geometry()
+                 if self.searchSuggestPanel.isVisible() else collapsed)
+        if not self.searchSuggestPanel.isVisible():
+            self.searchSuggestPanel.setGeometry(start)
+            self.searchSuggestPanel.show()
+        self.searchSuggestPanel.raise_()
+        self._animate_panel_geometry(start, end)
+
+    def _toggle_search_suggestions(self):
+        if self._suggestions_open and self.searchSuggestPanel.isVisible():
+            self._hide_search_suggestions()
+        else:
+            self._show_search_suggestions()
+
+    def _resize_open_search_suggestions(self):
+        """热门榜与历史切换时，让悬浮层平滑适配新高度。"""
+        if not self._suggestions_open or not self.searchSuggestPanel.isVisible():
+            return
+        start = self.searchSuggestPanel.geometry()
+        _collapsed, end = self._popup_geometries(
+            self.searchSuggestPanel.sizeHint().height())
+        if start != end:
+            self._animate_panel_geometry(start, end)
+
+    def _hide_search_suggestions(self):
+        """将悬浮推荐层向上滑回搜索框。"""
+        if self._search_commit_timer.isActive():
+            self._commit_pending_search()
+        if not self.searchSuggestPanel.isVisible():
+            self._suggestions_open = False
+            self.searchDropDownBtn.setIcon(FIF.DOWN)
+            self.searchDropDownBtn.setAccessibleName(
+                L("展开搜索推荐", "Show search suggestions"))
+            return
+        self._suggestions_open = False
+        self.searchDropDownBtn.setIcon(FIF.DOWN)
+        self.searchDropDownBtn.setToolTip(
+            L("展开搜索推荐", "Show search suggestions"))
+        self.searchDropDownBtn.setAccessibleName(
+            L("展开搜索推荐", "Show search suggestions"))
+        start = self.searchSuggestPanel.geometry()
+        collapsed, _expanded = self._popup_geometries(start.height())
+        end = collapsed
+
+        def _collapsed():
+            if not self._suggestions_open:
+                self.searchSuggestPanel.hide()
+
+        self._animate_panel_geometry(start, end, _collapsed)
+
+    def _schedule_application_deactivate_check(self):
+        """避免 Tool 窗口产生的瞬时失活打断箭头收起动画。"""
+        if self._deactivate_check_pending:
+            return
+        self._deactivate_check_pending = True
+
+        def _check():
+            self._deactivate_check_pending = False
+            app = QApplication.instance()
+            if app is not None and app.applicationState() != Qt.ApplicationActive:
+                self._force_hide_search_suggestions()
+
+        QTimer.singleShot(220, _check)
+
+    def _force_hide_search_suggestions(self):
+        """切页/失活时立即清理顶层悬浮窗和未完成动画。"""
+        animation = self._height_animations.pop("panel", None)
+        if animation is not None:
+            animation.stop()
+        self._suggestions_open = False
+        self.searchSuggestPanel.hide()
+        self.searchDropDownBtn.setIcon(FIF.DOWN)
+        self.searchDropDownBtn.setToolTip(
+            L("展开搜索推荐", "Show search suggestions"))
+        self.searchDropDownBtn.setAccessibleName(
+            L("展开搜索推荐", "Show search suggestions"))
+
+    def _on_search_theme_changed(self, *_args):
+        """主题切换时立即刷新已打开下拉层，而不是等到下次打开。"""
+        self.searchSuggestPanel.setBackgroundColor(
+            self.searchSuggestPanel._normalBackgroundColor())
+        self._refresh_search_suggestions()
+        self.searchSuggestPanel.update()
+
+    def _focus_search(self):
+        """Ctrl+F 聚焦搜索框，但不违背“点击才弹出”的交互。"""
+        self.searchEdit.setFocus()
+        self.searchEdit.selectAll()
+
+    def _submit_search(self, term):
+        """回车或放大镜执行搜索、保存历史并收起下拉层。"""
+        self._commit_search(term)
+        self._hide_search_suggestions()
+
+    def _commit_pending_search(self):
+        """把停止输入后的有效关键词写入搜索历史。"""
+        term = self.searchEdit.text().strip()
+        if term:
+            self._commit_search(term)
+
+    def _on_search_text_changed(self, text):
+        """实时筛选，并在停止输入后把关键词加入搜索历史。"""
+        self._apply_filter(text)
+        self._search_commit_timer.stop()
+        if str(text or "").strip():
+            self._search_commit_timer.start()
+
+    def _update_hot_searches(self, entries):
+        """从市场条目生成热门词；有热度统计时优先按统计值排序。"""
+        def score(entry):
+            popularity = 0
+            for key in ("popularity", "downloads", "download_count",
+                        "install_count", "stars"):
+                try:
+                    popularity = max(popularity, int(entry.get(key, 0) or 0))
+                except (TypeError, ValueError):
+                    pass
+            return popularity, str(entry.get("date", "") or "")
+
+        terms = []
+        folded_terms = set()
+        for entry in sorted(entries or [], key=score, reverse=True):
+            term = _i18n_text(entry.get("name", "")).strip()
+            folded = term.casefold()
+            if term and folded not in folded_terms:
+                terms.append(term)
+                folded_terms.add(folded)
+            if len(terms) >= self._MAX_HOT_SEARCHES:
+                break
+        self._hot_searches = terms
+        self._refresh_search_suggestions()
+
+    def _refresh_search_suggestions(self):
+        """刷新热门词和历史列表，不重建控件以避免界面闪动。"""
+        for i, (btn, _rank_label, term_label) in enumerate(self._hot_buttons):
+            visible = i < len(self._hot_searches)
+            term = self._hot_searches[i] if visible else ""
+            btn.setProperty("searchTerm", term)
+            term_label.setText(term)
+            term_label.setStyleSheet(
+                "color: #FFFFFF; background: transparent;"
+                if isDarkTheme()
+                else "color: #1F1F1F; background: transparent;")
+            btn.setToolTip(term)
+            btn.setAccessibleName(
+                L(f"第 {i + 1} 名热门搜索：{term}",
+                  f"Popular search #{i + 1}: {term}"))
+            btn.setVisible(visible)
+
+        has_history = bool(self._search_history)
+        show_hot = bool(self._hot_searches) and not has_history
+        show_empty = not show_hot and not has_history
+        self.hotTitle.setVisible(show_hot)
+        self.hotHost.setVisible(show_hot)
+        self.historyTitle.setVisible(has_history)
+        self.historyClearBtn.setVisible(has_history)
+        self.historyHost.setVisible(has_history or show_empty)
+        self.historyEmpty.setVisible(show_empty)
+        for i, (row, term_btn, delete_btn) in enumerate(self._history_rows):
+            visible = i < len(self._search_history)
+            term = self._search_history[i] if visible else ""
+            term_btn.setProperty("searchTerm", term)
+            term_btn.setText(term)
+            term_btn.setToolTip(term)
+            term_btn.setAccessibleName(
+                L(f"搜索历史：{term}", f"Search history: {term}"))
+            delete_btn.setProperty("searchTerm", term)
+            delete_btn.setAccessibleName(
+                L(f"删除搜索历史：{term}", f"Delete search history: {term}"))
+            row.setVisible(visible)
+        QTimer.singleShot(0, self._resize_open_search_suggestions)
+
+    def _commit_search(self, term):
+        """按回车或点击搜索按钮后，将有效关键词写入最近历史。"""
+        self._search_commit_timer.stop()
+        term = str(term or "").strip()[:100]
+        if not term:
+            return
+        folded = _normalize_search_text(term)
+        old_history = list(self._search_history)
+        self._search_history = [x for x in self._search_history
+                                if _normalize_search_text(x) != folded]
+        self._search_history.insert(0, term)
+        del self._search_history[self._MAX_SEARCH_HISTORY:]
+        if self._search_history != old_history:
+            settings.set("plugin_market_search_history", self._search_history)
+        self._refresh_search_suggestions()
+
+    def _use_search_term(self, term):
+        term = str(term or "").strip()
+        if not term:
+            return
+        self.searchEdit.setText(term)
+        self._commit_search(term)
+        self._hide_search_suggestions()
+        self.searchEdit.setFocus()
+
+    def _delete_search_term(self, term):
+        folded = _normalize_search_text(str(term or "").strip())
+        self._search_history = [x for x in self._search_history
+                                if _normalize_search_text(x) != folded]
+        settings.set("plugin_market_search_history", self._search_history)
+        self._refresh_search_suggestions()
+
+    def _clear_search_history(self):
+        self._search_history = []
+        settings.set("plugin_market_search_history", [])
+        self._refresh_search_suggestions()
+
+    def is_favorite(self, pid: str) -> bool:
+        return str(pid or "") in self._favorite_ids
+
+    def toggle_favorite(self, pid: str):
+        pid = str(pid or "").strip()
+        if not pid:
+            return
+        if pid in self._favorite_ids:
+            self._favorite_ids.remove(pid)
+        else:
+            self._favorite_ids.add(pid)
+        settings.set("plugin_market_favorites", sorted(self._favorite_ids))
+        for card in self._all_cards:
+            if str(card.entry.get("id", "")) == pid:
+                card.refresh_favorite()
+                break
+        self._update_filter_counts()
+        self._apply_filter(self.searchEdit.text())
+
+    def _set_favorites_only(self, checked):
+        self._favorites_only = bool(checked)
+        self.favoriteFilterAction.setChecked(self._favorites_only)
+        self._update_filter_tooltip()
         self._apply_filter(self.searchEdit.text())
 
     def _set_filter_cat(self, key: str):
@@ -868,7 +1534,80 @@ class PluginMarketPage(QWidget):
         self._filter_cat = key
         for act, k in self._filter_actions:
             act.setChecked(k == key)
+        self._update_filter_tooltip()
         self._apply_filter(self.searchEdit.text())
+
+    def _set_filter_state(self, key: str):
+        """按未安装、已安装、可更新或已禁用筛选。"""
+        self._filter_state = key
+        for act, k in self._filter_state_actions:
+            act.setChecked(k == key)
+        self._update_filter_tooltip()
+        self._apply_filter(self.searchEdit.text())
+
+    def _reset_market_filters(self):
+        self._filter_cat = "all"
+        self._filter_state = "all"
+        self._favorites_only = False
+        for act, key in self._filter_actions:
+            act.setChecked(key == "all")
+        for act, key in self._filter_state_actions:
+            act.setChecked(key == "all")
+        self.favoriteFilterAction.setChecked(False)
+        self.searchEdit.clear()
+        self._update_filter_tooltip()
+        self._apply_filter("")
+
+    def _update_filter_tooltip(self):
+        parts = []
+        if self._filter_cat != "all":
+            parts.append(_i18n_text(_category_label(self._filter_cat)))
+        state_labels = {
+            "absent": ("未安装", "Not installed"),
+            "same": ("已安装", "Installed"),
+            "update": ("可更新", "Updates available"),
+            "disabled": ("已禁用", "Disabled"),
+        }
+        if self._filter_state != "all":
+            parts.append(_i18n_text(state_labels[self._filter_state]))
+        if self._favorites_only:
+            parts.append(L("仅看收藏", "Favorites only"))
+        if parts:
+            self.filterBtn.setToolTip(
+                L(f"当前筛选：{'、'.join(parts)}",
+                  f"Active filters: {', '.join(parts)}"))
+        else:
+            self.filterBtn.setToolTip(
+                L("筛选类型和安装状态", "Filter by type and install status"))
+
+    def _update_filter_counts(self):
+        """在筛选菜单中显示各分类和安装状态的实时数量。"""
+        cards = getattr(self, "_all_cards", [])
+        category_counts = {"all": len(cards)}
+        state_counts = {"all": len(cards)}
+        for card in cards:
+            category = _entry_category(card.entry)
+            state = MarketClient.installed_state(card.entry)
+            category_counts[category] = category_counts.get(category, 0) + 1
+            state_counts[state] = state_counts.get(state, 0) + 1
+
+        for act, key in self._filter_actions:
+            label = L("全部", "All") if key == "all" \
+                else _i18n_text(_category_label(key))
+            act.setText(f"{label} ({category_counts.get(key, 0)})")
+        state_labels = {
+            "all": ("全部状态", "All states"),
+            "absent": ("未安装", "Not installed"),
+            "same": ("已安装", "Installed"),
+            "update": ("可更新", "Updates available"),
+            "disabled": ("已禁用", "Disabled"),
+        }
+        for act, key in self._filter_state_actions:
+            label = _i18n_text(state_labels[key])
+            act.setText(f"{label} ({state_counts.get(key, 0)})")
+        self.favoriteFilterAction.setText(
+            L(f"仅看收藏 ({len(self._favorite_ids)})",
+              f"Favorites only ({len(self._favorite_ids)})"))
 
     def _toggle_sort_dir(self):
         """正序 ↔ 倒序切换。"""
@@ -892,7 +1631,11 @@ class PluginMarketPage(QWidget):
             return _i18n_text(e.get("name", "")).lower()
         if idx == 2:      # 作者
             return str(e.get("author", "") or "").lower()
-        return _ver_tuple(str(e.get("version", "0") or "0"))  # 版本
+        if idx == 3:
+            return _ver_tuple(str(e.get("version", "0") or "0"))  # 版本
+        # 状态倒序：可更新 > 未安装 > 已禁用 > 已安装
+        state_order = {"same": 1, "disabled": 2, "absent": 3, "update": 4}
+        return state_order.get(MarketClient.installed_state(e), 0)
 
     def _resort(self):
         """按当前排序方式重排卡片（保持末尾 stretch）。"""
@@ -907,30 +1650,67 @@ class PluginMarketPage(QWidget):
             self.listLay.insertWidget(self.listLay.count() - 1, card)
 
     def _apply_filter(self, kw: str):
-        kw = (kw or "").strip().lower()
+        raw_kw = str(kw or "").strip()
+        tokens = [x for x in _normalize_search_text(raw_kw).split() if x]
         visible = 0
         for card in getattr(self, "_all_cards", []):
             e = card.entry
             ok = True
             if self._filter_cat != "all":
                 ok = (_entry_category(e) == self._filter_cat)
-            if ok and kw:
+            state = MarketClient.installed_state(e)
+            if ok and self._filter_state != "all":
+                ok = state == self._filter_state
+            if ok and self._favorites_only:
+                ok = str(e.get("id", "")) in self._favorite_ids
+            if ok and tokens:
                 name = e.get("name", "")
                 if isinstance(name, (tuple, list)):
                     name = " ".join(str(x) for x in name)
                 desc = e.get("description", "")
                 if isinstance(desc, (tuple, list)):
                     desc = " ".join(str(x) for x in desc)
-                hay = " ".join(str(x) for x in (e.get("id", ""), name,
-                                                 e.get("author", ""), desc)).lower()
-                ok = kw in hay
+                cat_label = " ".join(_category_label(_entry_category(e)))
+                state_labels = {
+                    "absent": "未安装 not installed available",
+                    "same": "已安装 installed",
+                    "update": "可更新 update updates available",
+                    "disabled": "已禁用 disabled",
+                }
+                hay = _normalize_search_text(" ".join(str(x) for x in (
+                    e.get("id", ""), name, e.get("author", ""), desc,
+                    e.get("version", ""), cat_label, state_labels.get(state, ""))))
+                ok = all(token in hay for token in tokens)
             card.setVisible(ok)
             if ok:
                 visible += 1
-        if self._all_cards and (kw or self._filter_cat != "all"):
-            self.statusLabel.setText(
-                L(f"匹配 {visible} / {len(self._all_cards)} 个插件",
-                  f"{visible} / {len(self._all_cards)} plugin(s) match"))
+        self._last_visible_count = visible
+        total = len(getattr(self, "_all_cards", []))
+        active = bool(tokens or self._filter_cat != "all"
+                      or self._filter_state != "all" or self._favorites_only)
+        src = self._market_source_suffix
+        incompatible = self._incompatible_count
+        upgrade_zh = f"；另有 {incompatible} 个需要升级 NetPulse" if incompatible else ""
+        upgrade_en = (f"; {incompatible} require a newer NetPulse"
+                      if incompatible else "")
+        if not total:
+            self.statusLabel.setText(L(
+                f"暂无可安装的插件{src}{upgrade_zh}",
+                f"No installable plugins{src}{upgrade_en}"))
+        elif active and not visible:
+            detail_zh = f"“{raw_kw}”" if raw_kw else "当前筛选条件"
+            detail_en = f'"{raw_kw}"' if raw_kw else "the active filters"
+            self.statusLabel.setText(L(
+                f"没有找到匹配 {detail_zh} 的插件，可清空关键词或筛选",
+                f"No plugins match {detail_en}; clear the query or filters"))
+        elif active:
+            self.statusLabel.setText(L(
+                f"匹配 {visible} / {total} 个插件{src}{upgrade_zh}",
+                f"{visible} / {total} plugin(s) match{src}{upgrade_en}"))
+        else:
+            self.statusLabel.setText(L(
+                f"共 {total} 个插件{src}{upgrade_zh}",
+                f"{total} plugin(s){src}{upgrade_en}"))
 
     def _on_error(self, msg):
         self.spinner.hide()
@@ -943,6 +1723,11 @@ class PluginMarketPage(QWidget):
             w = self.listLay.itemAt(i).widget()
             if isinstance(w, MarketCard):
                 w.refresh_state()
+        # 安装、更新、启用后，状态筛选结果也要立即重新计算。
+        self._update_filter_counts()
+        self._apply_filter(self.searchEdit.text())
+        if self.sortCombo.currentIndex() == 4:
+            self._resort()
 
     def install_card(self, card: MarketCard):
         self._active_card = card
@@ -1138,8 +1923,11 @@ class PluginMarketPage(QWidget):
             "title": f"Unpublish plugin: {pid}",
             "head": f"{fork_full.split('/')[0]}:{branch}",
             "base": _REPO_BRANCH,
-            "body": f"## 下架插件\n\n- **插件 ID**: {pid}\n- **名称**: {entry.get('name', '')}\n\n"
-                    f"由 NetPulse 插件市场一键下架功能自动创建。",
+            "body": L(
+                f"## 下架插件\n\n- **插件 ID**: {pid}\n- **名称**: {entry.get('name', '')}\n\n"
+                f"由 NetPulse 插件市场一键下架功能自动创建。",
+                f"## Unpublish plugin\n\n- **Plugin ID**: {pid}\n- **Name**: {entry.get('name', '')}\n\n"
+                f"Created automatically by NetPulse Marketplace."),
         }, timeout=15)
         if r.status_code not in (200, 201):
             raise Exception(f"PR creation failed ({r.status_code}): {r.text}")
@@ -1167,7 +1955,7 @@ class PluginMarketPage(QWidget):
     def _save_plugin_icon(entry: dict):
         """把市场条目的图标（data URI 或 URL）保存为 {pid}.icon.png。"""
         pid = entry.get("id", "")
-        if not pid:
+        if not is_valid_market_plugin_id(pid):
             return
         icon_val = entry.get("icon", "")
         if not icon_val:
@@ -1175,13 +1963,9 @@ class PluginMarketPage(QWidget):
         try:
             data = None
             if isinstance(icon_val, str) and icon_val.startswith("data:"):
-                # data:image/png;base64,xxxx
-                header, b64 = icon_val.split(",", 1)
-                data = base64.b64decode(b64)
-            elif isinstance(icon_val, str) and icon_val.startswith("http"):
-                r = requests.get(icon_val, timeout=10)
-                r.raise_for_status()
-                data = r.content
+                data = decode_data_uri_icon(icon_val)
+            elif isinstance(icon_val, str) and icon_val.startswith(("http://", "https://")):
+                data = _download_icon_bytes(icon_val)
             if data:
                 from app.services.plugins import plugins_dir
                 dst = os.path.join(plugins_dir(), f"{pid}.icon.png")
@@ -1832,14 +2616,19 @@ class PublishDialog(MessageBoxBase):
                     f"Add plugin: {pid}", branch_name, headers, idx_sha)
 
         self.statusUpdate.emit(L("正在提交，将自动上架…", "Submitting, will go live automatically…"))
-        pr_body = (
+        pr_body = L(
             f"## 新插件提交\n\n"
             f"- **插件 ID**: {pid}\n"
             f"- **名称**: {entry['name'][0]} / {entry['name'][1]}\n"
             f"- **版本**: {entry['version']}\n"
             f"- **作者**: {entry.get('author', '')}\n\n"
-            f"由 NetPulse 客户端一键发布。"
-        )
+            f"由 NetPulse 客户端一键发布。",
+            f"## New plugin submission\n\n"
+            f"- **Plugin ID**: {pid}\n"
+            f"- **Name**: {entry['name'][0]} / {entry['name'][1]}\n"
+            f"- **Version**: {entry['version']}\n"
+            f"- **Author**: {entry.get('author', '')}\n\n"
+            f"Published from the NetPulse client.")
         r = requests.post(f"{upstream}/pulls", headers=headers, json={
             "title": f"Publish plugin: {pid}",
             "head": f"{username}:{branch_name}",

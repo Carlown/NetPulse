@@ -10,7 +10,7 @@ _crash_log_file = open(os.path.join(_crash_log_dir, "crash.log"), "a", encoding=
 faulthandler.enable(_crash_log_file)
 
 # 仅导入最核心、最轻量的模块，确保启动画面能第一时间显示
-from PySide6.QtCore import QTimer, QSize
+from PySide6.QtCore import QLocale, QTimer, QSize
 from PySide6.QtWidgets import QApplication
 from app.ui.splash import create_splash
 
@@ -68,14 +68,15 @@ def main():
     step(45, "加载主题...", "Loading theme...")
     setThemeColor(settings.theme_color or "#0078D4")
     setTheme(Theme.DARK if settings.theme == "dark" else Theme.LIGHT)
-    try:
-        from qfluentwidgets import Language, setLanguage
-        if current_lang() == "en-US":
-            setLanguage(Language.EN)
-        else:
-            setLanguage(getattr(Language, "ZH_CN", Language.ZH_CN))
-    except Exception:
-        pass
+    # qfluentwidgets 的 pip 版本使用 Qt Translator，而不是旧版的
+    # setLanguage/Language API。安装对应翻译器后，导航按钮、菜单等
+    # 组件自带文案才能真正跟随 NetPulse 的语言设置。
+    from qfluentwidgets import FluentTranslator
+    fluent_locale = QLocale("en_US" if current_lang() == "en-US" else "zh_CN")
+    fluent_translator = FluentTranslator(fluent_locale, app)
+    app.installTranslator(fluent_translator)
+    # 显式保留引用，避免翻译器被垃圾回收。
+    app._fluent_translator = fluent_translator
 
     # ⑤ 创建主窗口
     from app.ui.main_window import MainWindow

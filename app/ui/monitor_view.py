@@ -1,15 +1,27 @@
-"""监控面板：资源卡片（带进度条）+ CPU/内存曲线 + 网络速率曲线。"""
+"""监控面板：资源卡片、可暂停实时曲线与采样历史导出。"""
+import csv
+from collections import deque
+from datetime import datetime
+
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QGridLayout, QLabel,
-                               QVBoxLayout, QWidget, QProgressBar)
-from qfluentwidgets import (CaptionLabel, ScrollArea, SimpleCardWidget,
-                            StrongBodyLabel, SubtitleLabel, isDarkTheme, qconfig)
+from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
+                               QProgressBar, QVBoxLayout, QWidget)
+from qfluentwidgets import (CaptionLabel, ComboBox, InfoBar, PushButton,
+                            ScrollArea, SimpleCardWidget, StrongBodyLabel,
+                            SubtitleLabel, isDarkTheme, qconfig)
 
 from app.services.monitor import monitor
 from app.ui.charts import ACCENT, GREEN, PURPLE, HoverChart
 from app.ui.i18n import L
 
 WINDOW_POINTS = 60  # 最近 60 个采样点（约 1 分钟，每秒一次）
+MAX_WINDOW_POINTS = 900
+WINDOW_OPTIONS = (60, 300, 900)
+CSV_FIELDS = (
+    "timestamp", "cpu_percent", "memory_percent", "memory_used_gb",
+    "memory_total_gb", "download_kbs", "upload_kbs", "tcp_connections",
+    "process_count",
+)
 
 
 def _usage_color(pct: float) -> str:
@@ -130,6 +142,9 @@ class MonitorView(ScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("monitorView")
+        self._samples = deque(maxlen=MAX_WINDOW_POINTS)
+        self._window_points = WINDOW_POINTS
+        self._plot_paused = False
         self.view = QWidget(self)
         self.setWidget(self.view)
         self.setWidgetResizable(True)
@@ -138,7 +153,31 @@ class MonitorView(ScrollArea):
         root = QVBoxLayout(self.view)
         root.setContentsMargins(36, 24, 36, 24)
         root.setSpacing(16)
-        root.addWidget(SubtitleLabel(L("监控面板", "Monitor"), self.view))
+
+        # 标题与实时曲线工具栏
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        header.addWidget(SubtitleLabel(L("监控面板", "Monitor"), self.view))
+        header.addStretch(1)
+        header.addWidget(CaptionLabel(L("时间窗", "Window"), self.view))
+        self.windowCombo = ComboBox(self.view)
+        self.windowCombo.addItems([
+            L("1 分钟", "1 min"), L("5 分钟", "5 min"), L("15 分钟", "15 min")
+        ])
+        self.windowCombo.setCurrentIndex(0)
+        self.windowCombo.setMinimumWidth(92)
+        self.windowCombo.currentIndexChanged.connect(self._on_window_changed)
+        header.addWidget(self.windowCombo)
+        self.pauseBtn = PushButton(L("暂停绘图", "Pause Charts"), self.view)
+        self.pauseBtn.clicked.connect(self._toggle_plot_pause)
+        header.addWidget(self.pauseBtn)
+        self.clearBtn = PushButton(L("清空历史", "Clear History"), self.view)
+        self.clearBtn.clicked.connect(self._clear_history)
+        header.addWidget(self.clearBtn)
+        self.exportBtn = PushButton(L("导出 CSV", "Export CSV"), self.view)
+        self.exportBtn.clicked.connect(self._export_csv)
+        header.addWidget(self.exportBtn)
+        root.addLayout(header)
 
         grid = QGridLayout()
         grid.setSpacing(12)
@@ -161,8 +200,10 @@ class MonitorView(ScrollArea):
         cl.addWidget(StrongBodyLabel(L("CPU / 内存趋势", "CPU / Memory Trend"), cpu_card))
         self.cpuPlot = HoverChart(window_points=WINDOW_POINTS, y_min=0.0)
         self.cpuPlot.addLegend(offset=(8, 8))
-        self.cpuPlot.add_series(L("CPU %", "CPU %"), ACCENT, " %")
-        self.cpuPlot.add_series(L("内存 %", "Memory %"), PURPLE, " %")
+        self._cpu_name = L("CPU %", "CPU %")
+        self._mem_name = L("内存 %", "Memory %")
+        self.cpuPlot.add_series(self._cpu_name, ACCENT, " %")
+        self.cpuPlot.add_series(self._mem_name, PURPLE, " %")
         cl.addWidget(self.cpuPlot, 1)
         root.addWidget(cpu_card, 1)
 
@@ -173,15 +214,12 @@ class MonitorView(ScrollArea):
         nl.addWidget(StrongBodyLabel(L("网络速率", "Network Throughput"), net_card))
         self.netPlot = HoverChart(window_points=WINDOW_POINTS, y_min=0.0)
         self.netPlot.addLegend(offset=(8, 8))
-        self.netPlot.add_series(L("下行 KB/s", "Download KB/s"), ACCENT, " KB/s")
-        self.netPlot.add_series(L("上行 KB/s", "Upload KB/s"), GREEN, " KB/s")
+        self._down_name = L("下行 KB/s", "Download KB/s")
+        self._up_name = L("上行 KB/s", "Upload KB/s")
+        self.netPlot.add_series(self._down_name, ACCENT, " KB/s")
+        self.netPlot.add_series(self._up_name, GREEN, " KB/s")
         nl.addWidget(self.netPlot, 1)
         root.addWidget(net_card, 1)
-
-        self._cpu: list[float] = []
-        self._mem: list[float] = []
-        self._down: list[float] = []
-        self._up: list[float] = []
 
         monitor.updated.connect(self._on_update)
 
@@ -200,27 +238,96 @@ class MonitorView(ScrollArea):
             f"{mem_used:.1f} / {mem_total:.1f} GB  剩余 {mem_free:.1f} GB",
             f"{mem_used:.1f} / {mem_total:.1f} GB  {mem_free:.1f} GB free"
         ))
-        self.tTcp.set(str(d["tcp_conns"]) if d["tcp_conns"] >= 0 else L("无权限", "N/A"))
+        tcp_conns = int(d["tcp_conns"])
+        self.tTcp.set(str(tcp_conns) if tcp_conns >= 0 else L("无权限", "N/A"))
         try:
             import psutil
-            self.tProc.set(str(len(psutil.pids())))
+            process_count = len(psutil.pids())
         except Exception:
-            self.tProc.set("--")
+            process_count = -1
+        self.tProc.set(str(process_count) if process_count >= 0 else "--")
 
-        self._cpu.append(cpu)
-        self._mem.append(mem_pct)
-        self._down.append(float(d["down_kbs"]))
-        self._up.append(float(d["up_kbs"]))
-        self._cpu = self._cpu[-WINDOW_POINTS:]
-        self._mem = self._mem[-WINDOW_POINTS:]
-        self._down = self._down[-WINDOW_POINTS:]
-        self._up = self._up[-WINDOW_POINTS:]
+        # 无论曲线是否暂停，采样都持续写入固定长度缓存。
+        self._samples.append({
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "cpu_percent": cpu,
+            "memory_percent": mem_pct,
+            "memory_used_gb": mem_used,
+            "memory_total_gb": mem_total,
+            "download_kbs": float(d["down_kbs"]),
+            "upload_kbs": float(d["up_kbs"]),
+            "tcp_connections": tcp_conns,
+            "process_count": process_count,
+        })
+        if not self._plot_paused:
+            self._refresh_plots()
 
+    def _refresh_plots(self):
+        samples = list(self._samples)[-self._window_points:]
         self.cpuPlot.set_data({
-            L("CPU %", "CPU %"): self._cpu,
-            L("内存 %", "Memory %"): self._mem,
+            self._cpu_name: [s["cpu_percent"] for s in samples],
+            self._mem_name: [s["memory_percent"] for s in samples],
         })
         self.netPlot.set_data({
-            L("下行 KB/s", "Download KB/s"): self._down,
-            L("上行 KB/s", "Upload KB/s"): self._up,
+            self._down_name: [s["download_kbs"] for s in samples],
+            self._up_name: [s["upload_kbs"] for s in samples],
         })
+
+    def _toggle_plot_pause(self):
+        self._plot_paused = not self._plot_paused
+        self.pauseBtn.setText(
+            L("继续绘图", "Resume Charts") if self._plot_paused
+            else L("暂停绘图", "Pause Charts")
+        )
+        if not self._plot_paused:
+            self._refresh_plots()
+
+    def _clear_history(self):
+        self._samples.clear()
+        # 清空同时退出手动缩放，确保下一条采样能立即重新出现在视野中。
+        self.cpuPlot.set_window_points(self._window_points)
+        self.netPlot.set_window_points(self._window_points)
+        self.cpuPlot.set_data({self._cpu_name: [], self._mem_name: []})
+        self.netPlot.set_data({self._down_name: [], self._up_name: []})
+
+    def _on_window_changed(self, index: int):
+        if not 0 <= index < len(WINDOW_OPTIONS):
+            return
+        self._window_points = WINDOW_OPTIONS[index]
+        self.cpuPlot.set_window_points(self._window_points)
+        self.netPlot.set_window_points(self._window_points)
+        # 直接操作时间窗应立即生效；暂停只阻止后台采样触发重绘。
+        self._refresh_plots()
+
+    def _export_csv(self):
+        samples = list(self._samples)
+        if not samples:
+            InfoBar.warning(
+                L("暂无数据", "No data"),
+                L("当前没有可导出的监控历史", "There is no monitoring history to export"),
+                parent=self.window(),
+            )
+            return
+        default_name = "netpulse-monitor-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, L("导出监控数据", "Export monitoring data"), default_name,
+            L("CSV 文件 (*.csv)", "CSV files (*.csv)"),
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerows(samples)
+            InfoBar.success(
+                L("导出成功", "Exported"),
+                L(f"已导出 {len(samples)} 条监控记录", f"Exported {len(samples)} monitoring samples"),
+                parent=self.window(),
+            )
+        except Exception as e:
+            InfoBar.error(
+                L("导出失败", "Export failed"), str(e), parent=self.window()
+            )
