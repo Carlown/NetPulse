@@ -99,6 +99,25 @@
       "sha256": "ab705427e8c8e94d5b5ad1800b2fc1455c3773ad3870ccc624896271a5e4bd83",
       "min_app": "1.0.7",
       "homepage": "https://github.com/Carlown/NetPulse"
+    },
+    {
+      "id": "quick_notes",
+      "name": [
+        "快速备注",
+        "Quick Notes"
+      ],
+      "version": "1.0",
+      "author": "NetPulse",
+      "description": [
+        "记录一条本地备注并显示当前应用版本",
+        "Save a local note and show the current app version"
+      ],
+      "category": "tool",
+      "date": "2026-08-22",
+      "file": "quick_notes.py",
+      "sha256": "8c88376fa0717f777f95a2f5620a8b3847d793610ecd4f76e7de65e5013e4c2f",
+      "min_app": "1.0.7",
+      "homepage": "https://github.com/Carlown/NetPulse"
     }
   ]
 }
