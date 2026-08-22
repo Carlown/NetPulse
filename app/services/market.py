@@ -79,7 +79,6 @@ def device_flow_poll(device_code: str, interval: int, expires_in: int) -> str:
     raise ValueError("authorization timeout")
 
 _TIMEOUT = 10
-_CACHE_WINDOW = 300  # 秒：raw 源加 ?t= 参数穿透 CDN 缓存，5 分钟一档
 _MAX_PLUGIN_BYTES = 2 * 1024 * 1024
 _MARKET_PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -91,16 +90,28 @@ def is_valid_market_plugin_id(value) -> bool:
 
 def _fetch_index_raw(url: str, kind: str):
     """拉取并解析索引，返回 dict；失败抛异常。kind: api | raw。"""
+    headers = {"User-Agent": "NetPulse", "Cache-Control": "no-cache"}
+    # Authenticated requests avoid GitHub's low anonymous API rate limit when
+    # the user has already authorized publishing from this installation.
+    try:
+        from app.services.settings import settings
+        token = str(settings.github_token or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    except Exception:
+        pass
     if kind == "api":
         r = requests.get(url, timeout=_TIMEOUT,
-                         headers={"Accept": "application/vnd.github+json"})
+                         headers={**headers, "Accept": "application/vnd.github+json"})
         r.raise_for_status()
         import base64
         payload = r.json()
         text = base64.b64decode(payload["content"]).decode("utf-8")
     else:
-        bust = f"{url}{'&' if '?' in url else '?'}t={int(time.time() // _CACHE_WINDOW)}"
-        r = requests.get(bust, timeout=_TIMEOUT)
+        # A five-minute bucket can serve an old raw.githubusercontent.com
+        # response immediately after a publish. Use a unique query each time.
+        bust = f"{url}{'&' if '?' in url else '?'}cachebust={time.time_ns()}"
+        r = requests.get(bust, timeout=_TIMEOUT, headers=headers)
         r.raise_for_status()
         text = r.text
     data = json.loads(text)
