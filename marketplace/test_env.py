@@ -26,6 +26,7 @@ class Plugin(NetPulsePlugin):
 
     # ---------- 数据采集 ----------
     def _collect(self):
+        tr = self._ctx.tr
         try:
             hostname = socket.gethostname()
         except Exception:
@@ -49,12 +50,16 @@ class Plugin(NetPulsePlugin):
         return [
             ("NetPulse", self._ctx.app_version or "-"),
             ("Python", f"{platform.python_version()} ({platform.python_implementation()})"),
-            ("操作系统", f"{platform.system()} {platform.release()} ({platform.machine()})"),
-            ("主机名", hostname),
-            ("本机 IP", local_ip),
-            ("时区", f"{tz} (UTC{utc_off})" if utc_off else tz),
-            ("当前时间", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-            ("插件目录", os.path.dirname(os.path.abspath(__file__))),
+            (tr("操作系统", "Operating system"),
+             f"{platform.system()} {platform.release()} ({platform.machine()})"),
+            (tr("主机名", "Hostname"), hostname),
+            (tr("本机 IP", "Local IP"), local_ip),
+            (tr("时区", "Time zone"),
+             f"{tr(tz, 'Local time')} (UTC{utc_off})" if utc_off else tr(tz, "Local time")),
+            (tr("当前时间", "Current time"),
+             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            (tr("插件目录", "Plugin directory"),
+             os.path.dirname(os.path.abspath(__file__))),
         ]
 
     # ---------- 页面 ----------

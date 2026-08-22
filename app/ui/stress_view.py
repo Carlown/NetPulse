@@ -8,7 +8,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, InfoBar,
-                            InfoBarPosition, MessageBox,
+                            InfoBarPosition, MenuAnimationType, MessageBox,
                             PrimaryPushButton, ProgressBar, PushButton,
                             ScrollArea, SimpleCardWidget, Slider, SpinBox,
                             StrongBodyLabel, SubtitleLabel, TextEdit,
@@ -222,9 +222,15 @@ class StressView(ScrollArea):
                                 L("配置文件缺少目标地址", "Config file is missing targets"),
                                 parent=self.window())
                 return False
-            # 协议白名单
+            # 协议白名单：保留当前已加载插件注册的自定义协议，避免
+            # 导出的插件配置导入后被静默改回 HTTP。
             proto = str(cfg.get("protocol", "HTTP")).upper()
             valid_protos = {"HTTP", "HTTPS", "TCP", "UDP", "ICMP"}
+            try:
+                from app.services.plugins import plugin_manager
+                valid_protos.update(plugin_manager.protocol_names())
+            except Exception:
+                pass
             if proto not in valid_protos:
                 proto = "HTTP"
             # 持续时间单位
@@ -232,14 +238,22 @@ class StressView(ScrollArea):
             dur_idx = self._DUR_UNIT_NAMES.index(dur_unit_name) if dur_unit_name in self._DUR_UNIT_NAMES else 0
             dur_val = int(cfg.get("duration_value", 30))
             dur_val = max(1, min(dur_val, self.DUR_MAX[dur_idx]))
+
+            def bounded_int(name, default, minimum, maximum):
+                value = int(cfg.get(name, default))
+                return max(minimum, min(value, maximum))
+
+            port = bounded_int("port", 80, 1, 65535)
+            threads = bounded_int("threads", settings.default_threads, 1, 1024)
+            rate = bounded_int("rate", settings.default_rate, 1, 100000)
             # 填充表单
             self.targetEdit.setPlainText("\n".join(str(t) for t in cfg["targets"]))
             idx = self.protoCombo.findText(proto)
             if idx >= 0:
                 self.protoCombo.setCurrentIndex(idx)
-            self.portSpin.setValue(int(cfg.get("port", 80)))
-            self.threadSpin.setValue(int(cfg.get("threads", settings.default_threads)))
-            self.rateSpin.setValue(int(cfg.get("rate", settings.default_rate)))
+            self.portSpin.setValue(port)
+            self.threadSpin.setValue(threads)
+            self.rateSpin.setValue(rate)
             self._dur_unit_idx = dur_idx
             self.durUnitCombo.setCurrentIndex(dur_idx)
             self.durSpin.setRange(1, self.DUR_MAX[dur_idx])
@@ -945,7 +959,7 @@ class StressView(ScrollArea):
             menu.addAction(Action(FIF.LIBRARY, label,
                                   triggered=lambda _=False, fn=fn: self._apply_plugin_targets(fn)))
         menu.exec(self.pluginTargetsBtn.mapToGlobal(self.pluginTargetsBtn.rect().bottomLeft()),
-                  aniType="drop")
+                  aniType=MenuAnimationType.DROP_DOWN)
 
     def _apply_plugin_targets(self, fn):
         """调用提供者回调，把返回的目标列表追加到目标编辑框。"""
@@ -1016,7 +1030,7 @@ class StressView(ScrollArea):
                                       triggered=lambda _=False, fn=fn, lb=label:
                                       self._do_export_report_plugin(r, fn, lb)))
         menu.exec(self.exportReportBtn.mapToGlobal(self.exportReportBtn.rect().bottomLeft()),
-                  aniType="drop")
+                  aniType=MenuAnimationType.DROP_DOWN)
 
     def _do_export_report_json(self, r):
         ts = _time.strftime("%Y%m%d_%H%M%S")

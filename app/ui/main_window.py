@@ -2,8 +2,8 @@
 import os
 import sys
 
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QCursor, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import QSystemTrayIcon
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import FluentWindow, NavigationItemPosition, RoundMenu, Action, isDarkTheme
@@ -146,8 +146,11 @@ class MainWindow(FluentWindow):
             self.tray_icon.setIcon(self.windowIcon())
         self.tray_icon.setToolTip("NetPulse")
 
-        # 使用 RoundMenu 自动适配深色/浅色主题
-        tray_menu = RoundMenu(parent=self)
+        # 使用 RoundMenu 自动适配深色/浅色主题。
+        # 不走 setContextMenu：Qt 原生定位在托盘靠近任务栏/屏幕边缘时会把
+        # 菜单底部挤出屏幕，只露出最下面的几项；改为右键时手动向上弹出。
+        self._tray_menu = RoundMenu(parent=self)
+        tray_menu = self._tray_menu
 
         show_action = Action(FIF.VIEW, L("显示主窗口", "Show Window"), self)
         show_action.triggered.connect(self._show_from_tray)
@@ -177,7 +180,6 @@ class MainWindow(FluentWindow):
         quit_action.triggered.connect(self._quit_app)
         tray_menu.addAction(quit_action)
 
-        self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
@@ -199,9 +201,33 @@ class MainWindow(FluentWindow):
             self._page_shortcuts.append(shortcut)
 
     def _on_tray_activated(self, reason):
-        """托盘图标双击显示窗口。"""
+        """托盘图标双击显示窗口，右键弹出完整菜单。"""
         if reason == QSystemTrayIcon.DoubleClick:
             self._show_from_tray()
+        elif reason == QSystemTrayIcon.Context:
+            self._popup_tray_menu()
+
+    def _popup_tray_menu(self):
+        """在托盘图标上方弹出完整菜单，并钳位到屏幕可用区域。
+
+        默认整体在光标上方展开（尽量靠上，不被任务栏遮挡）；只有上方
+        放不下时才向下弹。水平/垂直都做钳位，保证菜单完整可见。
+        """
+        menu = self._tray_menu
+        # RoundMenu 的 sizeHint() 在未显示前是过期值，先 adjustSize()
+        # 迫使内部布局重算，再用 size() 拿到真实尺寸
+        menu.adjustSize()
+        pos = QCursor.pos()
+        screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        size = menu.size()
+        x = pos.x() - size.width() // 2
+        y = pos.y() - size.height()
+        if y < avail.top():
+            y = pos.y()
+        x = max(avail.left(), min(x, avail.right() - size.width() + 1))
+        y = max(avail.top(), min(y, avail.bottom() - size.height() + 1))
+        menu.popup(QPoint(x, y))
 
     def _show_from_tray(self):
         """从托盘/最小化状态恢复显示窗口。"""

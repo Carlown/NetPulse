@@ -60,11 +60,19 @@ def _connect_tcp(host, port, timeout=8):
 
 def _parse_host_port(host_str, default_port=PORT):
     """解析 host:port 格式，支持 [IPv6]:port。"""
+    host_str = (host_str or "").strip()
     if host_str.startswith("[") and "]" in host_str:
         inside, _, rest = host_str.partition("]")
+        if not inside or (rest and not rest.startswith(":")):
+            raise ValueError("invalid bracketed host")
         host = inside.strip("[")
         p = rest.lstrip(":")
-        port = int(p) if p.isdigit() else default_port
+        if not p:
+            port = default_port
+        elif p.isdigit() and 0 < int(p) < 65536:
+            port = int(p)
+        else:
+            raise ValueError("port must be between 1 and 65535")
         return host, port
     elif host_str.count(":") == 1 and not host_str.replace(".", "").replace(":", "").isalpha():
         h, _, p = host_str.rpartition(":")
@@ -185,6 +193,7 @@ class CollabServer(QObject):
         """关闭所有连接和监听。"""
         self._gen += 1  # 使残留的MQTT后台线程全部失效
         self.active = False
+        self._relay_mode = False
         self._relay_connected = False  # 重置中继连接状态，避免残留旧状态
         # MQTT 中继先清理（需要 self._code 来发送房间关闭通知）
         # 把清理放到后台线程，避免阻塞 UI（sleep + disconnect 都是阻塞操作）

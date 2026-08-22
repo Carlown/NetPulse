@@ -759,12 +759,21 @@ class LocalPluginsPage(QWidget):
         warn.setWordWrap(True)
         root.addWidget(warn)
 
-        self.listHost = QWidget(self)
+        # 列表区域独立滚动：警告条和底部按钮行始终固定可见，
+        # 插件多了以后只滚动列表本身，不再滚动整个页面
+        self.listScroll = ScrollArea(self)
+        self.listScroll.setWidgetResizable(True)
+        self.listScroll.enableTransparentBackground()
+        self.listScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.listHost = QWidget()
+        self.listHost.setObjectName("localListHost")
+        self.listHost.setStyleSheet("#localListHost{background: transparent;}")
         self.listLay = QVBoxLayout(self.listHost)
         self.listLay.setContentsMargins(0, 0, 0, 0)
         self.listLay.setSpacing(2)
         self.listLay.addStretch(1)
-        root.addWidget(self.listHost, 1)
+        self.listScroll.setWidget(self.listHost)
+        root.addWidget(self.listScroll, 1)
 
         brow = QHBoxLayout()
         importBtn = PushButton(L("导入插件…", "Import Plugin…"), self)
@@ -1122,12 +1131,21 @@ class PluginMarketPage(QWidget):
         self.spinner.setFixedSize(28, 28)
         root.addWidget(self.spinner, 0, Qt.AlignCenter)
 
-        self.listHost = QWidget(self)
+        # 列表区域独立滚动：顶部搜索/筛选/排序栏和状态栏始终固定可见，
+        # 插件多了以后只滚动卡片列表，不再滚动整个页面
+        self.listScroll = ScrollArea(self)
+        self.listScroll.setWidgetResizable(True)
+        self.listScroll.enableTransparentBackground()
+        self.listScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.listHost = QWidget()
+        self.listHost.setObjectName("marketListHost")
+        self.listHost.setStyleSheet("#marketListHost{background: transparent;}")
         self.listLay = QVBoxLayout(self.listHost)
         self.listLay.setContentsMargins(0, 0, 0, 0)
         self.listLay.setSpacing(8)
         self.listLay.addStretch(1)
-        root.addWidget(self.listHost, 1)
+        self.listScroll.setWidget(self.listHost)
+        root.addWidget(self.listScroll, 1)
 
         self.client = MarketClient()
         self.client.index_ready.connect(self._on_index)
@@ -2008,33 +2026,32 @@ class PluginMarketPage(QWidget):
 # ---------- 插件主页面（Pivot 容器） ----------
 
 
-class MarketView(ScrollArea):
-    """插件页面：Pivot 切换本地插件 / 插件市场。"""
+class MarketView(QWidget):
+    """插件页面：Pivot 切换本地插件 / 插件市场。
+
+    页面本身不再滚动（标题和 Pivot 固定），各子页内部自行滚动列表。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("marketView")
-        self.view = QWidget(self)
-        self.setWidget(self.view)
-        self.setWidgetResizable(True)
-        self.enableTransparentBackground()
 
-        root = QVBoxLayout(self.view)
+        root = QVBoxLayout(self)
         root.setContentsMargins(36, 24, 36, 24)
         root.setSpacing(12)
 
-        root.addWidget(SubtitleLabel(L("插件", "Plugins"), self.view))
+        root.addWidget(SubtitleLabel(L("插件", "Plugins"), self))
 
-        self.pivot = Pivot(self.view)
-        self.stack = QStackedWidget(self.view)
+        self.pivot = Pivot(self)
+        self.stack = QStackedWidget(self)
         # 关键：内部 QStackedWidget 必须显式透明，否则主题切换时
         # 子类 QWidget 会回退到调色板绘制，叠加 Mica 出现底色反转
         # （浅色模式黑底、深色模式白底）。
         self.stack.setStyleSheet("QStackedWidget{background: transparent; border: none;}")
         self.stack.setAttribute(Qt.WA_StyledBackground, True)
 
-        self.localPage = LocalPluginsPage(self.view)
-        self.marketPage = PluginMarketPage(self.view)
+        self.localPage = LocalPluginsPage(self)
+        self.marketPage = PluginMarketPage(self)
         # 两个页面容器也显式透明，避免同样的回退底色问题
         self.localPage.setStyleSheet("#localPluginsPage{background: transparent;}")
         self.marketPage.setStyleSheet("#pluginMarketPage{background: transparent;}")
