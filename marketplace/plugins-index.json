@@ -22,25 +22,6 @@
       "homepage": "https://github.com/Carlown/NetPulse"
     },
     {
-      "id": "example_dns",
-      "name": [
-        "DNS 协议示例",
-        "DNS Protocol Example"
-      ],
-      "version": "1.0",
-      "author": "NetPulse",
-      "description": [
-        "注册自定义 DNS 测试协议与目标集提供者，演示插件扩展 API",
-        "Registers a custom DNS test protocol and target provider"
-      ],
-      "file": "example_dns.py",
-      "sha256": "ab705427e8c8e94d5b5ad1800b2fc1455c3773ad3870ccc624896271a5e4bd83",
-      "min_app": "1.0.7",
-      "category": "protocol",
-      "date": "2026-08-20",
-      "homepage": "https://github.com/Carlown/NetPulse"
-    },
-    {
       "id": "example_hello",
       "name": [
         "你好插件",
