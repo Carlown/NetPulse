@@ -18,8 +18,8 @@ import unicodedata
 import requests
 from PySide6.QtCore import (QEvent, QEasingCurve, QPoint, QPropertyAnimation,
                             QRect, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QKeySequence, QPixmap,
-                           QShortcut)
+from PySide6.QtGui import (QColor, QDesktopServices, QIcon, QKeySequence,
+                           QPainter, QPainterPath, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout,
                                QHBoxLayout, QLabel, QLayout, QStackedWidget,
                                QVBoxLayout, QWidget)
@@ -27,7 +27,7 @@ from qfluentwidgets import (Action, BodyLabel, CaptionLabel, ComboBox,
                             FluentIcon as FIF, IconWidget,
                             IndeterminateProgressRing, InfoBar, isDarkTheme,
                             LineEditButton, MessageBox, MessageBoxBase, Pivot,
-                            PrimaryPushButton, PushButton, RoundMenu,
+                            CheckableMenu, PrimaryPushButton, PushButton,
                             ScrollArea, SearchLineEdit, SimpleCardWidget,
                             StrongBodyLabel, SubtitleLabel, SwitchButton,
                             TextEdit, ToolButton, TransparentDropDownToolButton,
@@ -119,6 +119,27 @@ def _contrast_text_color(background: str) -> str:
     dark_contrast = (luminance + 0.05) / 0.05
     light_contrast = 1.05 / (luminance + 0.05)
     return "#111111" if dark_contrast >= light_contrast else "#FFFFFF"
+
+
+def _solid_heart_icon(color="#E81123") -> QIcon:
+    """生成实心收藏爱心；按钮本身的 Fluent 边框不受影响。"""
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    path = QPainterPath()
+    path.moveTo(32, 58)
+    path.cubicTo(28, 54, 5, 39, 5, 20)
+    path.cubicTo(5, 8, 18, 1, 28, 8)
+    path.cubicTo(30, 9, 31, 11, 32, 13)
+    path.cubicTo(33, 11, 34, 9, 36, 8)
+    path.cubicTo(46, 1, 59, 8, 59, 20)
+    path.cubicTo(59, 39, 36, 54, 32, 58)
+    painter.drawPath(path)
+    painter.end()
+    return QIcon(pixmap)
 
 # GitHub 一键发布相关常量
 _REPO_OWNER = "Carlown"
@@ -476,7 +497,7 @@ class MarketCard(SimpleCardWidget):
         pid = str(self.entry.get("id", ""))
         favorite = self.view.is_favorite(pid)
         self.favoriteBtn.setIcon(
-            FIF.HEART.icon(QColor("#E81123")) if favorite else FIF.HEART)
+            _solid_heart_icon() if favorite else FIF.HEART)
         self.favoriteBtn.setToolTip(
             L("取消收藏", "Remove from favorites") if favorite
             else L("收藏插件", "Add to favorites"))
@@ -906,7 +927,7 @@ class PluginMarketPage(QWidget):
         self.filterBtn = TransparentDropDownToolButton(FIF.FILTER, self)
         self.filterBtn.setToolTip(L("筛选类型和安装状态",
                                     "Filter by type and install status"))
-        self.filterMenu = RoundMenu(parent=self)
+        self.filterMenu = CheckableMenu(parent=self)
         self._filter_actions = []
         filter_items = [("all", ("全部", "All"))] + list(_PLUGIN_CATEGORIES)
         for key, label in filter_items:
