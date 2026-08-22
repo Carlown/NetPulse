@@ -4,9 +4,8 @@ import threading
 import requests
 from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QLabel, QWidget
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 REPO = "Carlown/NetPulse"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 LATEST_URL = f"https://github.com/{REPO}/releases/latest"
@@ -120,38 +119,27 @@ def check_for_updates(parent=None, manual: bool = False, on_finished=None):
 
 
 def _show_update_dialog(parent, tag, url, L):
-    from qfluentwidgets import MessageBox, CheckBox
+    from qfluentwidgets import MessageBoxBase, TitleLabel, BodyLabel, CheckBox
     from app.services.settings import settings
 
-    box = MessageBox(L(f"发现新版本 {tag}", f"New version {tag} available"),
-                     "", parent)
+    # MessageBoxBase：内容加入 viewLayout，随内容自动调整卡片大小
+    box = MessageBoxBase(parent)
 
-    # 替换默认内容标签为自定义布局
-    layout = box.layout()
-    # 移除默认的 textLabel
-    if hasattr(box, 'textLabel'):
-        layout.removeWidget(box.textLabel)
-        box.textLabel.deleteLater()
-
-    # 创建自定义内容区域
-    content = QWidget(box)
-    cl = QVBoxLayout(content)
-    cl.setContentsMargins(0, 0, 0, 0)
-    cl.setSpacing(12)
-
-    msg = QLabel(L(f"当前版本 v{APP_VERSION}，GitHub 已发布 {tag}。\n是否前往下载更新？",
-                    f"Current version v{APP_VERSION}; {tag} is now on GitHub.\n"
-                    f"Open the download page?"), content)
+    title = TitleLabel(L(f"发现新版本 {tag}", f"New version {tag} available"), box)
+    msg = BodyLabel(L(f"当前版本 v{APP_VERSION}，GitHub 已发布 {tag}。\n是否前往下载更新？",
+                      f"Current version v{APP_VERSION}; {tag} is now on GitHub.\n"
+                      f"Open the download page?"), box)
     msg.setWordWrap(True)
-    cl.addWidget(msg)
 
-    skipCheck = CheckBox(L("跳过此版本（不再提示本次更新）", "Skip this version (don't remind me again)"), content)
-    autoCheck = CheckBox(L("不再自动检查更新", "Don't check for updates automatically"), content)
-    cl.addWidget(skipCheck)
-    cl.addWidget(autoCheck)
+    skipCheck = CheckBox(L("跳过此版本（不再提示本次更新）", "Skip this version (don't remind me again)"), box)
+    autoCheck = CheckBox(L("不再自动检查更新", "Don't check for updates automatically"), box)
 
-    # 将内容插入到 layout 中（在按钮之前）
-    layout.insertWidget(1, content)
+    box.viewLayout.addWidget(title)
+    box.viewLayout.addWidget(msg)
+    box.viewLayout.addWidget(skipCheck)
+    box.viewLayout.addWidget(autoCheck)
+
+    box.widget.setFixedWidth(480)
 
     box.yesButton.setText(L("去更新", "Update"))
     box.cancelButton.setText(L("稍后再说", "Later"))
