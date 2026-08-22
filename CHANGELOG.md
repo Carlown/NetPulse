@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed marketplace refreshes returning stale indexes immediately after a plugin publish.
+- Fixed rapid marketplace refresh clicks duplicating plugin cards in the UI.
 - Preserved registered plugin protocols when importing stress-test configurations.
 - Clamped imported ports, thread counts, rate limits, and durations to supported ranges.
 - Rejected malformed bracketed IPv6 host/port values in collaborative direct-connect mode.
