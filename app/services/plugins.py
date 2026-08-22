@@ -63,6 +63,12 @@ def resolve_plugin_icon(plugin, pid: str, rec_path: str = "", icon_val: str = ""
     ic = ic.strip()
     if not ic:
         return None
+    # 图片文件名（如 "test_env.png"）：优先按插件目录解析，
+    # 否则不含斜杠的文件名会被误当成 FluentIcon 名
+    if not os.path.isabs(ic) and rec_path:
+        rel = os.path.join(os.path.dirname(rec_path), ic)
+        if os.path.isfile(rel):
+            return QIcon(rel)
     # FluentIcon 名（如 "SPEED_HIGH"）
     if not os.path.isabs(ic) and not os.path.exists(ic) and "/" not in ic and "\\" not in ic:
         try:
@@ -70,9 +76,7 @@ def resolve_plugin_icon(plugin, pid: str, rec_path: str = "", icon_val: str = ""
             return getattr(FIF, ic.upper(), None)
         except Exception:
             return None
-    # 图片路径（相对插件文件目录）
-    if not os.path.isabs(ic) and rec_path:
-        ic = os.path.join(os.path.dirname(rec_path), ic)
+    # 图片路径（绝对路径 / 相对当前目录）
     if os.path.isfile(ic):
         return QIcon(ic)
     return None
@@ -283,7 +287,6 @@ class PluginManager(QObject):
         self._exporters = {}        # 导出器名 -> {"label", "fn"}
         self._target_providers = {} # 提供者名 -> {"label", "fn"}
         self._metric_subs = []      # [{"pid", "fn"}]
-        self._ensure_example()
         self.discover()
 
     # ---------- 扩展注册表（由 PluginContext 调用） ----------
@@ -362,23 +365,6 @@ class PluginManager(QObject):
                 log.error(L(f"插件指标回调失败: {e}", f"Plugin metrics callback failed: {e}"))
 
     # ---------- 发现 ----------
-    def _ensure_example(self):
-        """首次运行时在插件目录放置示例插件，演示 API 用法。"""
-        p = os.path.join(plugins_dir(), "example_hello.py")
-        if not os.path.exists(p):
-            try:
-                with open(p, "w", encoding="utf-8") as f:
-                    f.write(EXAMPLE_PLUGIN)
-            except Exception:
-                pass
-        p2 = os.path.join(plugins_dir(), "example_dns.py")
-        if not os.path.exists(p2):
-            try:
-                with open(p2, "w", encoding="utf-8") as f:
-                    f.write(EXAMPLE_DNS_PLUGIN)
-            except Exception:
-                pass
-
     def discover(self):
         """扫描插件目录，合并式更新记录列表：同 ID 保留原 record（含已加载实例），
         避免设置页刷新时把已加载插件重置为未加载。"""
@@ -601,171 +587,6 @@ class PluginManager(QObject):
         return True
 
 
-EXAMPLE_PLUGIN = '''# -*- coding: utf-8 -*-
-"""NetPulse 示例插件：演示插件 API 基本用法。
-
-插件开发说明：
-- 继承 NetPulsePlugin（宿主已自动注入，无需 import）
-- name / description 支持 (中文, 英文) 元组，自动跟随界面语言
-- create_widget(parent) 返回的控件会作为独立页面加入主窗口导航
-- on_load(ctx) / on_unload() 管理生命周期
-- ctx.get(key) / ctx.set(key, value) 读写插件私有配置（自动持久化）
-- 插件是第三方代码，请仅安装可信来源的插件
-"""
-
-
-class Plugin(NetPulsePlugin):
-    name = ("你好插件", "Hello Plugin")
-    version = "1.0"
-    author = "NetPulse"
-    description = ("示例插件：演示 NetPulse 插件 API，可在 设置 → 插件 中禁用或删除",
-                   "Example plugin demonstrating the plugin API; disable or remove it in Settings → Plugins")
-
-    def on_load(self, ctx):
-        # ctx: plugin_id / app_version / logger / tr() / get() / set()
-        self._ctx = ctx
-        self._count = ctx.get("click_count", 0)
-
-    def create_widget(self, parent):
-        from PySide6.QtWidgets import QWidget, QVBoxLayout
-        from qfluentwidgets import StrongBodyLabel, BodyLabel, PushButton, InfoBar
-
-        w = QWidget(parent)
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(36, 24, 36, 24)
-        lay.setSpacing(12)
-        lay.addWidget(StrongBodyLabel(self._ctx.tr("你好，来自插件！", "Hello from plugin!")))
-        lay.addWidget(BodyLabel(self._ctx.tr(
-            "这是 NetPulse 的示例插件页面。你可以在 设置 → 插件 中禁用、重新加载或删除它。",
-            "This is the NetPulse example plugin page. Disable, reload or remove it in Settings → Plugins.")))
-        btn = PushButton(self._ctx.tr("点我试试", "Click me"))
-
-        def _click():
-            self._count += 1
-            self._ctx.set("click_count", self._count)
-            InfoBar.success(self._ctx.tr("插件运行正常", "Plugin works"),
-                            self._ctx.tr(f"已点击 {self._count} 次（计数已持久化）",
-                                         f"Clicked {self._count} times (persisted)"),
-                            parent=w.window())
-
-        btn.clicked.connect(_click)
-        lay.addWidget(btn)
-        lay.addStretch(1)
-        return w
-
-    def on_unload(self):
-        pass
-'''
-
-EXAMPLE_DNS_PLUGIN = '''# -*- coding: utf-8 -*-
-"""NetPulse 示例插件：注册自定义 "DNS" 测试协议 + CSV 目标集提供者。
-
-演示插件 API 的扩展能力：
-- register_protocol: 协议下拉框出现 DNS 项；目标填 DNS 服务器地址（如 223.5.5.5），端口 53
-- register_target_provider: 压测页"插件目标"按钮可一键导入常用 DNS 服务器列表
-- subscribe_metrics: 压测运行时实时接收 QPS/延迟指标
-- on_test_start / on_test_end: 压测生命周期回调
-
-自定义协议 handler 约定（在 worker 线程执行，须线程安全）：
-    handler(config, timeout, state) -> (ok, err, nbytes)
-    config: {"target", "port", "protocol", ...}
-    state:  每个 worker 线程一份的字典，可存放 socket 等长连接资源
-"""
-import random
-import socket
-import struct
-
-
-def _build_dns_query(domain: str) -> bytes:
-    """构造一个标准递归 DNS A 记录查询报文。"""
-    tid = random.randint(0, 0xFFFF)
-    header = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
-    qname = b"".join(bytes([len(p)]) + p.encode() for p in domain.split(".")) + b"\\x00"
-    return header + qname + struct.pack(">HH", 1, 1)  # QTYPE=A, QCLASS=IN
-
-
-def _dns_handler(c, timeout, state):
-    """发一个 DNS 查询并等待响应；演示 state 复用 UDP socket。"""
-    sock = state.get("sock")
-    if sock is None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(timeout)
-        state["sock"] = sock
-        _STATES.append(state)  # 登记以便压测结束/卸载时统一清理
-    q = _build_dns_query(f"w{random.randint(0, 999999)}.example.com")
-    try:
-        sock.sendto(q, (c["target"], int(c.get("port") or 53)))
-        data, _ = sock.recvfrom(512)
-        ok = len(data) >= 12 and (data[2] & 0x80)  # 响应报文且 QR=1
-        return ok, None if ok else "bad_response", len(q)
-    except OSError as e:
-        # 出错后丢弃 socket，下次重建（复用坏 socket 会一直失败）
-        try:
-            sock.close()
-        except OSError:
-            pass
-        state["sock"] = None
-        s = str(e).lower()
-        if "timed out" in s:
-            return False, "timeout", len(q)
-        if "unreachable" in s:
-            return False, "unreachable", 0
-        return False, "conn", 0
-
-
-def _cleanup_state(state):
-    sock = state.pop("sock", None)
-    if sock:
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-
-# 收集所有 worker 的 state，压测结束/插件卸载时统一清理 socket
-_STATES = []
-
-
-class Plugin(NetPulsePlugin):
-    name = ("DNS 协议示例", "DNS Protocol Example")
-    version = "1.0"
-    author = "NetPulse"
-    description = ("注册自定义 DNS 测试协议与目标集提供者，演示插件扩展 API",
-                   "Registers a custom DNS test protocol and target provider")
-
-    def on_load(self, ctx):
-        self._ctx = ctx
-        ctx.register_protocol("DNS", _dns_handler)
-        ctx.register_target_provider(("常用 DNS 服务器", "Common DNS servers"),
-                                     self._dns_servers)
-        ctx.subscribe_metrics(self._on_metrics)
-
-    def _dns_servers(self):
-        return ["223.5.5.5", "119.29.29.29", "8.8.8.8", "1.1.1.1"]
-
-    def _on_metrics(self, snap):
-        # 实时指标回调（主线程，约 500ms 一次）——可做自己的可视化/告警
-        self._last_qps = snap.get("qps", 0.0)
-
-    def on_test_start(self, configs):
-        if any(c.get("protocol") == "DNS" for c in configs):
-            self._ctx.logger.info(self._ctx.tr(
-                f"DNS 协议插件：开始测试 {len(configs)} 个目标",
-                f"DNS plugin: testing {len(configs)} target(s)"))
-
-    def on_test_end(self, report):
-        self._ctx.logger.info(self._ctx.tr(
-            f"DNS 协议插件：测试结束，共 {report.get('total', 0)} 次查询",
-            f"DNS plugin: finished, {report.get('total', 0)} queries total"))
-        for st in list(_STATES):
-            _cleanup_state(st)
-        _STATES.clear()
-
-    def on_unload(self):
-        for st in list(_STATES):
-            _cleanup_state(st)
-        _STATES.clear()
-'''
 
 # 全局单例（与 settings/log 同风格）
 plugin_manager = PluginManager()

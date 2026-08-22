@@ -18,14 +18,16 @@ import requests
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout,
-                               QLabel, QStackedWidget, QVBoxLayout, QWidget)
+                               QLabel, QStackedWidget, QVBoxLayout,
+                               QWidget)
 from qfluentwidgets import (Action, BodyLabel, CaptionLabel, ComboBox,
-                            FluentIcon as FIF, IndeterminateProgressRing,
-                            InfoBar, MessageBox, MessageBoxBase, Pivot,
+                            FluentIcon as FIF, IconWidget,
+                            IndeterminateProgressRing, InfoBar, isDarkTheme,
+                            MessageBox, MessageBoxBase, Pivot,
                             PrimaryPushButton, PushButton, RoundMenu,
                             ScrollArea, SearchLineEdit, SimpleCardWidget,
                             StrongBodyLabel, SubtitleLabel, SwitchButton,
-                            TextEdit, ToolButton)
+                            TextEdit, ToolButton, TransparentDropDownToolButton)
 
 from app.services.market import (INDEX_EDIT_URL, MarketClient,
                                  GITHUB_OAUTH_CLIENT_ID, device_flow_start,
@@ -591,8 +593,14 @@ class LocalPluginRow(QWidget):
             f" border-radius:6px;")
 
     def _reload(self, pid):
+        name = _i18n_text(self._rec.display_name) or pid
         ok = plugin_manager.reload(pid)
-        if not ok:
+        if ok:
+            InfoBar.success(L("重载完成", "Reloaded"),
+                            L(f"插件已重新加载：{name}",
+                              f"Plugin reloaded: {name}"),
+                            parent=self.window(), duration=2500)
+        else:
             rec = plugin_manager.record(pid)
             msg = rec.error if rec and rec.error else L("未知错误", "Unknown error")
             InfoBar.error(L("重载失败", "Reload failed"), str(msg).splitlines()[0],
@@ -760,8 +768,11 @@ class PluginMarketPage(QWidget):
         topbar.addWidget(self.searchEdit, 1)
 
         # 筛选按钮：按类型筛选
+        # 注意：普通 ToolButton.setMenu 走的是 Qt 原生 QToolButton.setMenu(QMenu)，
+        # 而 RoundMenu 不是 QMenu，菜单弹不出来；必须用 DropDown 系列（自带
+        # setMenu(RoundMenu) + 点击弹出逻辑）。
         self._filter_cat = "all"
-        self.filterBtn = ToolButton(FIF.FILTER, self)
+        self.filterBtn = TransparentDropDownToolButton(FIF.FILTER, self)
         self.filterBtn.setToolTip(L("筛选类型", "Filter by type"))
         self.filterMenu = RoundMenu(parent=self)
         self._filter_actions = []
@@ -1245,6 +1256,40 @@ class MarketView(ScrollArea):
 
 # ---------- 发布对话框 ----------
 
+def _scan_plugin_meta(path):
+    """AST 解析插件源码，提取 NetPulsePlugin 子类的类属性元数据
+    （name/version/author/description/icon/category）。
+    不执行插件代码，禁用/加载失败的插件也能安全读取。"""
+    import ast
+    meta = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except Exception:
+        return meta
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = {b.id for b in node.bases if isinstance(b, ast.Name)}
+        if "NetPulsePlugin" not in bases:
+            continue
+        for item in node.body:
+            if (isinstance(item, ast.Assign) and len(item.targets) == 1
+                    and isinstance(item.targets[0], ast.Name)):
+                key = item.targets[0].id
+                val = item.value
+                if isinstance(val, ast.Constant):
+                    meta.setdefault(key, val.value)
+                elif isinstance(val, (ast.Tuple, ast.List)):
+                    parts = [e.value for e in val.elts
+                             if isinstance(e, ast.Constant)]
+                    if len(parts) == len(val.elts):
+                        meta.setdefault(key, tuple(parts))
+        if meta:
+            break
+    return meta
+
+
 class PublishDialog(MessageBoxBase):
     """发布向导：生成条目 JSON，支持一键通过 GitHub API 提交 PR。"""
 
@@ -1284,16 +1329,25 @@ class PublishDialog(MessageBoxBase):
         steps.setWordWrap(True)
         self.viewLayout.addWidget(steps)
 
-        # 本地插件选择
+        # 本地插件选择（禁用/未加载的插件也可发布：元数据从源码 AST 读取）
         row = QHBoxLayout()
-        row.addWidget(BodyLabel(L("本地插件", "Local plugin"), self.widget))
+        row.addWidget(BodyLabel(L("本地插件", "Local plugins"), self.widget))
         self.combo = ComboBox(self.widget)
         self._combo_pids = []
-        for rec in plugin_manager.records():
-            if rec.plugin is not None:
-                self.combo.addItem(
-                    f"{rec.pid} (v{getattr(rec.plugin, 'version', '?')})")
-                self._combo_pids.append(rec.pid)
+        for rec in (plugin_manager.records() or plugin_manager.discover()):
+            meta = {} if rec.plugin is not None else _scan_plugin_meta(rec.path)
+            name = (meta.get("name") or rec.display_name or rec.pid)
+            if isinstance(name, (tuple, list)):
+                name = name[0] if name else rec.pid
+            ver = meta.get("version") or rec.display_version or "?"
+            label = f"{name} (v{ver})"
+            if rec.plugin is None:   # 状态标记：让用户知道为何未加载
+                mark = {"disabled": L("已禁用", "disabled"),
+                        "error": L("加载失败", "load failed")}.get(
+                            rec.state, L("未加载", "not loaded"))
+                label += f" · {mark}"
+            self.combo.addItem(label)
+            self._combo_pids.append(rec.pid)
         self.combo.currentIndexChanged.connect(self._on_plugin_changed)
         row.addWidget(self.combo, 1)
         self.viewLayout.addLayout(row)
@@ -1363,38 +1417,59 @@ class PublishDialog(MessageBoxBase):
         btns.addStretch(1)
         self.viewLayout.addLayout(btns)
 
-        # 设备授权码展示区（拿到设备码时显示，大字号 + 一键复制）
+        # 设备授权码展示区（拿到设备码时显示，点击即复制）
         self.codePanel = QWidget(self.widget)
         self.codePanel.setObjectName("codePanel")
         self.codePanel.setStyleSheet(
             "#codePanel{background:rgba(0,120,212,0.12); border:1px solid rgba(0,120,212,0.4);"
             " border-radius:8px;}")
         cpLay = QVBoxLayout(self.codePanel)
-        cpLay.setContentsMargins(20, 16, 20, 16)
-        cpLay.setSpacing(8)
+        cpLay.setContentsMargins(14, 10, 14, 10)
+        cpLay.setSpacing(6)
         codeHint = BodyLabel(L(
             "请在浏览器中输入以下授权码，或直接点击复制：",
             "Enter this code in your browser, or click to copy:"), self.codePanel)
         cpLay.addWidget(codeHint)
+        # 同一行：授权码（左） + 重新打开浏览器按钮（右）
         codeRow = QHBoxLayout()
-        codeRow.setSpacing(12)
-        self.codeLabel = QLabel("------", self.codePanel)
+        codeRow.setSpacing(10)
+        # 可点击的授权码区域：整块都能点，hover 高亮反馈
+        self.codeClickBox = QWidget(self.codePanel)
+        self.codeClickBox.setObjectName("codeClickBox")
+        self.codeClickBox.setCursor(Qt.PointingHandCursor)
+        self.codeClickBox.setToolTip(L("点击复制授权码", "Click to copy code"))
+        cbl = QHBoxLayout(self.codeClickBox)
+        cbl.setContentsMargins(14, 6, 14, 6)
+        cbl.setSpacing(8)
+        self.codeLabel = QLabel("------", self.codeClickBox)
         self.codeLabel.setAlignment(Qt.AlignCenter)
         self.codeLabel.setStyleSheet(
-            "font-size:32px; font-weight:700; letter-spacing:6px;"
+            "font-size:20px; font-weight:700; letter-spacing:2px;"
             "font-family:'Consolas','Courier New',monospace; color:#0078D4;")
-        self.codeLabel.setCursor(Qt.PointingHandCursor)
-        self.codeLabel.mousePressEvent = lambda _e: self._copy_device_code()
-        codeRow.addWidget(self.codeLabel, 1)
-        self.copyCodeBtn = PushButton(L("复制代码", "Copy Code"), self.codePanel)
-        self.copyCodeBtn.clicked.connect(self._copy_device_code)
-        codeRow.addWidget(self.copyCodeBtn)
-        cpLay.addLayout(codeRow)
+        # 授权码等宽、不可压缩，否则会被布局挤压导致截断
+        self.codeLabel.setMinimumWidth(
+            self.codeLabel.fontMetrics().horizontalAdvance("W" * 9) + 6)
+        cbl.addWidget(self.codeLabel)
+        copyIco = IconWidget(FIF.COPY, self.codeClickBox)
+        copyIco.setFixedSize(16, 16)
+        cbl.addWidget(copyIco)
+        # 预留足够宽度：label 最小宽 + 左右边距 + 间距 + 复制图标
+        self.codeClickBox.setMinimumWidth(
+            self.codeLabel.minimumWidth() + 28 + 8 + 16)
+        self.codeClickBox.setStyleSheet(
+            "#codeClickBox{background:rgba(0,120,212,0.10); border-radius:6px;"
+            " border:1px dashed rgba(0,120,212,0.35);}"
+            "#codeClickBox:hover{background:rgba(0,120,212,0.22);"
+            " border:1px solid #0078D4;}")
+        self.codeClickBox.mousePressEvent = lambda _e: self._copy_device_code()
+        codeRow.addWidget(self.codeClickBox)
+        codeRow.addStretch(1)
         self.openBrowserBtn = PushButton(
             L("重新打开浏览器", "Reopen Browser"), self.codePanel)
         self.openBrowserBtn.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(self._device_uri)))
-        cpLay.addWidget(self.openBrowserBtn, 0, Qt.AlignLeft)
+        codeRow.addWidget(self.openBrowserBtn)
+        cpLay.addLayout(codeRow)
         self.viewLayout.addWidget(self.codePanel)
         self.codePanel.hide()
         self._device_uri = ""
@@ -1465,8 +1540,14 @@ class PublishDialog(MessageBoxBase):
         idx = self.combo.currentIndex()
         pid = self._combo_pids[idx] if 0 <= idx < len(self._combo_pids) else None
         rec = plugin_manager.record(pid) if pid else None
-        if rec is not None and rec.plugin is not None:
-            auto = self._auto_category(rec, rec.plugin)
+        if rec is not None:
+            if rec.plugin is not None:
+                auto = self._auto_category(rec, rec.plugin)
+            else:   # 未加载：从源码声明的 category 识别，无法识别则归为工具
+                auto = str(_scan_plugin_meta(rec.path).get(
+                    "category", "") or "").strip().lower()
+                if not any(k == auto for k, _ in _PLUGIN_CATEGORIES):
+                    auto = "tool"
             ci = [k for k, _ in _PLUGIN_CATEGORIES].index(auto)
             if self.catCombo.currentIndex() != ci:
                 self.catCombo.blockSignals(True)
@@ -1478,10 +1559,12 @@ class PublishDialog(MessageBoxBase):
         idx = self.combo.currentIndex()
         pid = self._combo_pids[idx] if 0 <= idx < len(self._combo_pids) else None
         rec = plugin_manager.record(pid) if pid else None
-        if rec is None or rec.plugin is None:
+        if rec is None:
             self.jsonBox.setPlainText("")
             return None
         p = rec.plugin
+        # 未加载（禁用/失败）时从源码 AST 读取元数据，发布不受加载状态影响
+        meta = {} if p is not None else _scan_plugin_meta(rec.path)
         digest = ""
         try:
             with open(rec.path, "rb") as f:
@@ -1492,12 +1575,19 @@ class PublishDialog(MessageBoxBase):
         def _tup(v):
             return list(v) if isinstance(v, (tuple, list)) else [str(v), str(v)]
 
+        name = getattr(p, "name", None) if p is not None else meta.get("name")
+        version = (getattr(p, "version", None) if p is not None
+                   else meta.get("version"))
+        author = (getattr(p, "author", None) if p is not None
+                  else meta.get("author"))
+        desc = (getattr(p, "description", None) if p is not None
+                else meta.get("description"))
         entry = {
             "id": rec.pid,
-            "name": _tup(getattr(p, "name", rec.pid)),
-            "version": str(getattr(p, "version", "1.0")),
-            "author": str(getattr(p, "author", "") or ""),
-            "description": _tup(getattr(p, "description", "")),
+            "name": _tup(name or rec.pid),
+            "version": str(version or "1.0"),
+            "author": str(author or ""),
+            "description": _tup(desc or ""),
             "category": [k for k, _ in _PLUGIN_CATEGORIES][
                 max(0, self.catCombo.currentIndex())],
             "date": datetime.date.today().isoformat(),
@@ -1586,13 +1676,16 @@ class PublishDialog(MessageBoxBase):
         self._device_code = code
         self._device_uri = uri
         self.codeLabel.setText(code)
+        # 按实际授权码宽度调整，保证不同长度的码都不被截断
+        self.codeLabel.setMinimumWidth(
+            self.codeLabel.fontMetrics().horizontalAdvance(code) + 6)
         self.codePanel.show()
         self.publishBtn.setText(L("等待浏览器授权…", "Waiting for browser…"))
         self.statusLabel.setText(L(
             "请在打开的浏览器中点击「Authorize」完成授权。若浏览器未自动打开，"
-            "请点击下方「重新打开浏览器」，或手动访问 github.com/login/device 并输入代码。",
+            "请点击右侧「重新打开浏览器」，或手动访问 github.com/login/device 并输入代码。",
             "Click Authorize in the opened browser. If it didn't open, "
-            "click 'Reopen Browser' or visit github.com/login/device and enter the code."))
+            "click 'Reopen Browser' on the right or visit github.com/login/device and enter the code."))
         opened = QDesktopServices.openUrl(QUrl(uri))
         if not opened:
             InfoBar.warning(L("浏览器未打开", "Browser didn't open"),
