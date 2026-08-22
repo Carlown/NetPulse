@@ -1175,7 +1175,10 @@ class PluginMarketPage(QWidget):
     def _on_index(self, entries, from_cache):
         from app.services.updater import APP_VERSION, _ver_tuple
         self.spinner.hide()
-        self._all_cards = []
+        # Multiple rapid refresh clicks can leave several fetch threads in
+        # flight. Clear the actual widgets for every response, not just the
+        # Python list, so late responses cannot duplicate cards on screen.
+        self._clear_cards()
         self._incompatible_count = 0
         for e in entries:
             minv = str(e.get("min_app", ""))
