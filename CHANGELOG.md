@@ -6,6 +6,7 @@
 
 - Fixed marketplace index requests falling back to the offline cache when an expired GitHub token was present.
 - Kept the cached GitHub login available for author-only marketplace actions after token cleanup.
+- Synced the Settings page immediately after disabling automatic update checks from the update prompt.
 
 ### Verified
 

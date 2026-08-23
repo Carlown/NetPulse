@@ -155,4 +155,20 @@ def _show_update_dialog(parent, tag, url, L):
         if settings.skip_version == tag:
             settings.set("skip_version", "")
     if autoCheck.isChecked():
-        settings.set("auto_check_updates", False)
+        if settings.set("auto_check_updates", False):
+            _sync_settings_view(parent)
+
+
+def _sync_settings_view(parent):
+    """Immediately refresh the Settings page after changing update checks."""
+    if parent is None:
+        return
+    try:
+        window = parent.window() if hasattr(parent, "window") else parent
+        view = getattr(window, "settingsView", None)
+        sync = getattr(view, "_sync_preference_controls", None)
+        if callable(sync):
+            sync()
+    except Exception:
+        # A headless updater check may not have a Settings page.
+        pass
