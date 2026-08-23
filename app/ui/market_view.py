@@ -444,25 +444,55 @@ class MarketCard(SimpleCardWidget):
         col.addWidget(dlab)
         lay.addLayout(col, 1)
 
-        # 按钮列：安装/更新 + 下架
+        # 作者保留原来的右侧纵向操作列；普通用户使用居中的安装 + 收藏操作列。
         btn_wrap = QWidget(self)
         btn_col = QVBoxLayout(btn_wrap)
         btn_col.setContentsMargins(0, 0, 0, 0)
         btn_col.setSpacing(4)
+
+        self.ownerActions = QWidget(btn_wrap)
+        owner_col = QVBoxLayout(self.ownerActions)
+        owner_col.setContentsMargins(0, 0, 0, 0)
+        owner_col.setSpacing(4)
         self.btn = PrimaryPushButton(btn_wrap)
         self.btn.setFixedWidth(96)
         self.btn.clicked.connect(self._install)
-        btn_col.addWidget(self.btn)
+        owner_col.addWidget(self.btn)
         self.unpubBtn = PushButton(L("下架", "Unpublish"), btn_wrap)
         self.unpubBtn.setFixedWidth(96)
         self._refresh_unpublish_style()
         qconfig.themeChanged.connect(self._refresh_unpublish_style)
         self.unpubBtn.clicked.connect(self._unpublish)
-        btn_col.addWidget(self.unpubBtn)
-        btn_col.addStretch(1)
+        owner_col.addWidget(self.unpubBtn)
+        btn_col.addWidget(self.ownerActions)
+
+        self.userActions = QWidget(btn_wrap)
+        user_row = QHBoxLayout(self.userActions)
+        user_row.setContentsMargins(0, 0, 0, 0)
+        user_row.setSpacing(8)
+        user_row.setAlignment(Qt.AlignCenter)
+        self.userInstallBtn = PrimaryPushButton(self.userActions)
+        self.userInstallBtn.setFixedWidth(96)
+        self.userInstallBtn.clicked.connect(self._install)
+        user_row.addWidget(self.userInstallBtn, 0, Qt.AlignCenter)
+        self.userFavoriteBtn = ToolButton(FIF.HEART, self.userActions)
+        self.userFavoriteBtn.setFixedSize(30, 30)
+        self.userFavoriteBtn.clicked.connect(self._toggle_favorite)
+        user_row.addWidget(self.userFavoriteBtn, 0, Qt.AlignCenter)
+        btn_col.addWidget(self.userActions)
+
         lay.addWidget(btn_wrap, 0, Qt.AlignVCenter)
+        self.set_owner_state(self.view.can_unpublish(entry))
         self.refresh_state()
         self.refresh_favorite()
+
+    def set_owner_state(self, is_owner: bool):
+        """作者显示原有管理布局，普通用户显示居中的安装/收藏布局。"""
+        self.ownerActions.setVisible(bool(is_owner))
+        self.userActions.setVisible(not is_owner)
+        self.favoriteBtn.setVisible(bool(is_owner))
+        self.userFavoriteBtn.setVisible(not is_owner)
+        self._is_owner = bool(is_owner)
 
     def _refresh_unpublish_style(self, *_):
         """主题重载后恢复“下架”按钮的危险操作语义色。"""
@@ -481,32 +511,31 @@ class MarketCard(SimpleCardWidget):
     def refresh_state(self):
         st = MarketClient.installed_state(self.entry)
         if st == "disabled":
-            self.btn.setText(L("启用", "Enable"))
-            self.btn.setEnabled(True)
+            text, enabled = L("启用", "Enable"), True
         elif st == "same":
-            self.btn.setText(L("已安装", "Installed"))
-            self.btn.setEnabled(False)
+            text, enabled = L("已安装", "Installed"), False
         elif st == "update":
-            self.btn.setText(L("更新", "Update"))
-            self.btn.setEnabled(True)
+            text, enabled = L("更新", "Update"), True
         else:
-            self.btn.setText(L("安装", "Install"))
-            self.btn.setEnabled(True)
+            text, enabled = L("安装", "Install"), True
+        for button in (self.btn, self.userInstallBtn):
+            button.setText(text)
+            button.setEnabled(enabled)
 
     def refresh_favorite(self):
         pid = str(self.entry.get("id", ""))
         favorite = self.view.is_favorite(pid)
-        self.favoriteBtn.setIcon(
-            _solid_heart_icon() if favorite else FIF.HEART)
-        self.favoriteBtn.setToolTip(
-            L("取消收藏", "Remove from favorites") if favorite
-            else L("收藏插件", "Add to favorites"))
-        self.favoriteBtn.setAccessibleName(
-            L(f"取消收藏：{self._txt(self.entry.get('name'))}",
-              f"Remove from favorites: {self._txt(self.entry.get('name'))}")
-            if favorite else
-            L(f"收藏：{self._txt(self.entry.get('name'))}",
-              f"Add to favorites: {self._txt(self.entry.get('name'))}"))
+        icon = _solid_heart_icon() if favorite else FIF.HEART
+        tooltip = (L("取消收藏", "Remove from favorites") if favorite
+                   else L("收藏插件", "Add to favorites"))
+        name = self._txt(self.entry.get("name"))
+        accessible = (L(f"取消收藏：{name}", f"Remove from favorites: {name}")
+                      if favorite else
+                      L(f"收藏：{name}", f"Add to favorites: {name}"))
+        for button in (self.favoriteBtn, self.userFavoriteBtn):
+            button.setIcon(icon)
+            button.setToolTip(tooltip)
+            button.setAccessibleName(accessible)
 
     def _toggle_favorite(self):
         self.view.toggle_favorite(str(self.entry.get("id", "")))
@@ -522,8 +551,9 @@ class MarketCard(SimpleCardWidget):
                             parent=self.window(), duration=3000)
             self.refresh_state()
             return
-        self.btn.setEnabled(False)
-        self.btn.setText(L("下载中…", "Downloading…"))
+        for button in (self.btn, self.userInstallBtn):
+            button.setEnabled(False)
+            button.setText(L("下载中…", "Downloading…"))
         self.view.install_card(self)
 
     def _unpublish(self):
@@ -881,13 +911,16 @@ class PluginMarketPage(QWidget):
     unpubAuthOk = Signal(object, str, object)  # entry, token, card
     unpubOk = Signal(str, bool, object)      # url, is_direct, card
     unpubErr = Signal(str, object)           # msg, card
+    identityReady = Signal(str)              # 当前 GitHub 登录名
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._github_login = ""
         self.unpubAuthNeeded.connect(self._on_unpub_auth_needed)
         self.unpubAuthOk.connect(lambda e, t, c: self._do_unpublish(e, t, c))
         self.unpubOk.connect(self._on_unpub_ok)
         self.unpubErr.connect(self._on_unpub_err)
+        self.identityReady.connect(self._set_github_identity)
         self.setObjectName("pluginMarketPage")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 8, 0, 0)
@@ -1153,11 +1186,60 @@ class PluginMarketPage(QWidget):
         self.client.download_ready.connect(self._on_downloaded)
         self.client.download_failed.connect(self._on_download_failed)
         plugin_manager.changed.connect(lambda: QTimer.singleShot(0, self._refresh_buttons))
+        self._load_github_identity()
         self._all_cards = []
         self._last_visible_count = 0
         self._market_source_suffix = ""
         self._incompatible_count = 0
         self._load()
+
+    def _load_github_identity(self):
+        """异步读取当前授权账号，用于只给插件作者显示下架操作。"""
+        cached_login = str(settings.github_login or "").strip()
+        token = str(settings.github_token or "").strip()
+        if not token:
+            self._set_github_identity(cached_login)
+            return
+
+        def _work():
+            try:
+                login = gh_get_user(token)
+            except Exception:
+                # GitHub 暂时离线或 token 已过期时，沿用最近一次成功身份；
+                # 下架动作本身仍会要求重新授权，不会绕过 GitHub 校验。
+                login = cached_login
+            else:
+                settings.set("github_login", login)
+            self.identityReady.emit(login)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _set_github_identity(self, login):
+        self._github_login = str(login or "").strip().casefold()
+        for i in range(self.listLay.count()):
+            card = self.listLay.itemAt(i).widget()
+            if isinstance(card, MarketCard):
+                card.set_owner_state(self.can_unpublish(card.entry))
+
+    def can_unpublish(self, entry: dict) -> bool:
+        """只有当前 GitHub 账号是该条目发布者时才允许下架。"""
+        if not self._github_login:
+            return False
+        publisher = str(entry.get("publisher", "") or "").strip().casefold()
+        if not publisher:
+            # 兼容旧索引：只有作者字段恰好等于 GitHub 登录名才放行。
+            publisher = str(entry.get("author", "") or "").strip().casefold()
+        return bool(publisher and publisher == self._github_login)
+
+    @staticmethod
+    def _normalize_market_entry(entry: dict) -> dict:
+        """给旧版官方索引补齐发布者字段，保证离线缓存也能识别作者。"""
+        if (not entry.get("publisher")
+                and str(entry.get("author", "")).strip() == "NetPulse"
+                and str(entry.get("homepage", "")).startswith(
+                    f"https://github.com/{_REPO_OWNER}/")):
+            entry["publisher"] = _REPO_OWNER
+        return entry
 
     def _load(self):
         self.statusLabel.setText(L("正在加载市场…", "Loading marketplace…"))
@@ -1174,6 +1256,7 @@ class PluginMarketPage(QWidget):
 
     def _on_index(self, entries, from_cache):
         from app.services.updater import APP_VERSION, _ver_tuple
+        entries = [self._normalize_market_entry(e) for e in entries]
         self.spinner.hide()
         # Multiple rapid refresh clicks can leave several fetch threads in
         # flight. Clear the actual widgets for every response, not just the
@@ -1779,6 +1862,13 @@ class PluginMarketPage(QWidget):
         """下架插件：需要 GitHub 授权后创建移除 PR。"""
         entry = card.entry
         pid = entry.get("id", "?")
+        if not self.can_unpublish(entry):
+            InfoBar.warning(
+                L("无权下架", "Unpublish not allowed"),
+                L("只有插件作者可以下架自己的插件。",
+                  "Only the plugin publisher can unpublish this plugin."),
+                parent=self.window(), duration=5000)
+            return
         token = (settings.github_token or "").strip()
         card.unpubBtn.setEnabled(False)
         card.unpubBtn.setText(L("下架中…", "Unpublishing…"))
@@ -1802,7 +1892,11 @@ class PluginMarketPage(QWidget):
                     self._unpublish_device_flow(entry, card)
                     return
             except Exception:
-                pass
+                # 401/网络异常：保留本地作者身份，但要求重新授权后再下架。
+                settings.set("github_token", "")
+                if GITHUB_OAUTH_CLIENT_ID:
+                    self._unpublish_device_flow(entry, card)
+                    return
             self._do_unpublish(entry, token, card)
         threading.Thread(target=_check, daemon=True).start()
 
@@ -1819,6 +1913,7 @@ class PluginMarketPage(QWidget):
                                          d.get("interval", 5),
                                          d.get("expires_in", 900))
                 settings.set("github_token", token)
+                settings.set("github_login", gh_get_user(token))
                 self.unpubAuthOk.emit(entry, token, card)
             except Exception as e:
                 self.unpubErr.emit(str(e), card)
@@ -1889,6 +1984,9 @@ class PluginMarketPage(QWidget):
         headers = gh_headers(token)
         upstream = f"{_GH_API}/repos/{_REPO_OWNER}/{_REPO_NAME}"
         username = gh_get_user(token)
+        publisher = str(entry.get("publisher", "") or entry.get("author", ""))
+        if publisher.strip() and publisher.strip().casefold() != username.strip().casefold():
+            raise PermissionError("GitHub account is not the plugin publisher")
         can_push = gh_can_push(token)
         idx_path = f"{_MARKET_DIR}/plugins-index.json"
         plugin_path = f"{_MARKET_DIR}/{pid}.py"
@@ -2565,6 +2663,9 @@ class PublishDialog(MessageBoxBase):
         pid = entry["id"]
         upstream = f"{_GH_API}/repos/{_REPO_OWNER}/{_REPO_NAME}"
         username = gh_get_user(token)
+        settings.set("github_login", username)
+        # 用稳定的 GitHub 登录名记录发布者，市场卡片据此只向作者显示“下架”。
+        entry["publisher"] = username
         can_push = gh_can_push(token)
 
         # ---------- 路径 A：所有者/协作者，直接提交到 master ----------

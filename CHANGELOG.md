@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.7] - 2026-08-23
+
+### Fixed
+
+- Fixed marketplace index requests falling back to the offline cache when an expired GitHub token was present.
+- Kept the cached GitHub login available for author-only marketplace actions after token cleanup.
+
+### Verified
+
+- English-mode UI smoke check passed with no visible Chinese text in the loaded application widgets.
+- Dark-mode theme switching passed in the Qt offscreen regression check.
+- Marketplace index fetch returned live entries instead of the local cache.
+
 ## [1.1.6] - 2026-08-22
 
 ### Fixed

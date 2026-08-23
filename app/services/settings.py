@@ -56,6 +56,7 @@ class AppSettings:
         "plugin_market_search_history": [],  # 插件市场搜索历史（最近优先）
         "plugin_market_favorites": [],       # 插件市场本地收藏 ID
         "github_token": "",           # GitHub Personal Access Token（一键发布插件用）
+        "github_login": "",           # 最近一次成功授权的 GitHub 登录名（离线识别作者）
     }
 
     def __init__(self):
@@ -119,7 +120,7 @@ class AppSettings:
             if type(raw.get(key, cls.DEFAULTS[key])) is not bool:
                 clean[key] = cls.DEFAULTS[key]
 
-        for key in ("log_dir", "skip_version", "github_token"):
+        for key in ("log_dir", "skip_version", "github_token", "github_login"):
             if type(raw.get(key, cls.DEFAULTS[key])) is not str:
                 clean[key] = cls.DEFAULTS[key]
 

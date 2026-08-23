@@ -91,18 +91,34 @@ def is_valid_market_plugin_id(value) -> bool:
 def _fetch_index_raw(url: str, kind: str):
     """拉取并解析索引，返回 dict；失败抛异常。kind: api | raw。"""
     headers = {"User-Agent": "NetPulse", "Cache-Control": "no-cache"}
-    # Authenticated requests avoid GitHub's low anonymous API rate limit when
-    # the user has already authorized publishing from this installation.
+    settings_obj = None
+    token = ""
+    # Authenticated API requests avoid GitHub's low anonymous rate limit when
+    # the user has already authorized publishing from this installation. The
+    # raw CDN endpoint must stay anonymous: an expired OAuth token makes raw
+    # requests return 401 and incorrectly forces the UI into offline-cache mode.
     try:
         from app.services.settings import settings
+        settings_obj = settings
         token = str(settings.github_token or "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
     except Exception:
         pass
     if kind == "api":
-        r = requests.get(url, timeout=_TIMEOUT,
-                         headers={**headers, "Accept": "application/vnd.github+json"})
+        request_headers = {**headers, "Accept": "application/vnd.github+json"}
+        if token:
+            request_headers["Authorization"] = f"Bearer {token}"
+        r = requests.get(url, timeout=_TIMEOUT, headers=request_headers)
+        # A saved token can expire or be revoked. Clear only the credential,
+        # retain github_login for offline author identification, then retry
+        # anonymously so a public index remains online.
+        if r.status_code == 401 and token:
+            if settings_obj is not None:
+                try:
+                    settings_obj.set("github_token", "")
+                except Exception:
+                    pass
+            request_headers.pop("Authorization", None)
+            r = requests.get(url, timeout=_TIMEOUT, headers=request_headers)
         r.raise_for_status()
         import base64
         payload = r.json()
