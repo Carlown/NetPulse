@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.2.0] - 2026-08-24
+
+### Added
+
+- Added smooth staggered control reveals to startup and every main page, including the plugin marketplace.
+- Added a bilingual Page Animations setting that applies immediately and is included in preference backup, restore, and reset workflows.
+
+### Changed
+
+- Registered the system tray icon at application startup so it remains available throughout the running session.
+- Disabled both page transitions and control reveals when Page Animations is turned off.
+
+### Fixed
+
+- Prevented page text from appearing for one frame before its entrance animation begins.
+- Cleaned up active effects during rapid page switches and when animations are disabled at runtime.
+- Added transition-stop compatibility for current and newer QFluentWidgets stacked-widget implementations.
+- Included first-launch dashboard animation and first-visit marketplace animation.
+- Corrected stale marketplace checksums for the Traditional Chinese, Lucky Wheel, and Quick Notes plugins.
+
+### Verified
+
+- Confirmed that disabling automatic update checks takes effect immediately without restarting the application.
+- Passed English-mode runtime scans across all main pages and both marketplace tabs with no visible Chinese text.
+- Passed dark-mode rendering checks across all main pages.
+- Passed animation cleanup, rapid-switching, settings persistence, and tray startup checks.
+
 ## [1.1.9] - 2026-08-24
 
 ### Changed

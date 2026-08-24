@@ -2,10 +2,10 @@
 import threading
 
 import requests
-from PySide6.QtCore import QObject, QUrl, Qt, Signal
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.2.0"
 REPO = "Carlown/NetPulse"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 LATEST_URL = f"https://github.com/{REPO}/releases/latest"

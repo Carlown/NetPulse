@@ -1,7 +1,7 @@
 """设置页：主题/语言/默认参数/日志管理/检查更新/作者。"""
 from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QCursor, QFont
-from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout,
                                QVBoxLayout, QWidget, QPushButton)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ColorDialog, ComboBox, InfoBar,
                             MessageBox, PushButton, ScrollArea, SimpleCardWidget,
@@ -11,7 +11,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ColorDialog, ComboBox, Info
 
 from app.services.logger import log
 from app.services.settings import settings
-from app.services.updater import APP_VERSION, LATEST_URL, check_for_updates
+from app.services.updater import APP_VERSION
 from app.ui.disclaimer import DisclaimerDialog
 from app.ui.i18n import L
 
@@ -169,6 +169,14 @@ class SettingsView(ScrollArea):
                                 L("按钮、进度环等强调色，选择后立即生效",
                                   "Accent color for buttons and highlights; applies instantly"),
                                 self.colorPicker, appear))
+        self.animationSwitch = SwitchButton()
+        self.animationSwitch.setChecked(bool(settings.animations_enabled))
+        self.animationSwitch.checkedChanged.connect(self._animation_changed)
+        al.addWidget(SettingRow(
+            L("页面动画", "Page animations"),
+            L("启用页面切换和控件依次浮现效果",
+              "Enable page transitions and staggered control reveals"),
+            self.animationSwitch, appear))
         self.traySwitch = SwitchButton()
         self.traySwitch.setChecked(settings.minimize_to_tray)
         self.traySwitch.checkedChanged.connect(
@@ -352,6 +360,23 @@ class SettingsView(ScrollArea):
         setTheme(Theme.DARK if checked else Theme.LIGHT)
         settings.set("theme", "dark" if checked else "light")
 
+    def _animation_changed(self, checked):
+        """保存动画偏好并立即应用到主窗口。"""
+        if not settings.set("animations_enabled", bool(checked)):
+            was_blocked = self.animationSwitch.blockSignals(True)
+            self.animationSwitch.setChecked(not checked)
+            self.animationSwitch.blockSignals(was_blocked)
+            InfoBar.error(
+                L("保存失败", "Save Failed"),
+                L(f"无法保存动画设置：{settings.last_error}",
+                  f"Could not save the animation setting: {settings.last_error}"),
+                parent=self.window(), duration=5000)
+            return
+        apply_setting = getattr(
+            self.window(), "set_page_animations_enabled", None)
+        if callable(apply_setting):
+            apply_setting(bool(checked))
+
     def _lang_changed(self, idx):
         settings.set("language", {0: "auto", 1: "zh-CN", 2: "en-US"}.get(idx, "auto"))
         InfoBar.success(L("已保存", "Saved"),
@@ -362,6 +387,8 @@ class SettingsView(ScrollArea):
         """从 settings 同步本页控件，不触发写回信号。"""
         controls = (
             (self.darkSwitch, "setChecked", settings.theme == "dark"),
+            (self.animationSwitch, "setChecked",
+             bool(settings.animations_enabled)),
             (self.traySwitch, "setChecked", bool(settings.minimize_to_tray)),
             (self.autoUpdateSwitch, "setChecked", bool(settings.auto_check_updates)),
             (self.langCombo, "setCurrentIndex",
@@ -379,10 +406,14 @@ class SettingsView(ScrollArea):
         self.colorPicker._refresh()
 
     def _apply_preference_theme(self):
-        """恢复/重置后立即应用主题和强调色。"""
+        """恢复/重置后立即应用外观偏好。"""
         setTheme(Theme.DARK if settings.theme == "dark" else Theme.LIGHT)
         setThemeColor(QColor(str(settings.theme_color)))
         self.colorPicker._refresh()
+        apply_setting = getattr(
+            self.window(), "set_page_animations_enabled", None)
+        if callable(apply_setting):
+            apply_setting(bool(settings.animations_enabled))
 
     def _show_language_restart_notice(self):
         InfoBar.info(
@@ -550,6 +581,8 @@ class SettingsView(ScrollArea):
             L("Fluent Widgets：", "Fluent Widgets: ") + fluent_version,
             L("主题 / 强调色：", "Theme / accent: ") + f"{theme_name} / {safe['theme_color']}",
             L("语言：", "Language: ") + language_name,
+            L("页面动画：", "Page animations: ")
+            + yes_no(safe["animations_enabled"]),
             L("默认线程 / 超时 / QPS：", "Defaults threads / timeout / QPS: ")
             + f"{safe['default_threads']} / {safe['default_timeout_ms']} ms / {safe['default_rate']}",
             L("默认时长 / 数据包：", "Default duration / packet: ")

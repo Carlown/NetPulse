@@ -1,7 +1,7 @@
 ; NetPulse Installer Script (Inno Setup 7)
 ; 中英双语安装程序
 #define MyAppName "NetPulse"
-#define MyAppVersion "1.1.9"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "NetPulse"
 #define MyAppExeName "NetPulse.exe"
 #define MyAppDirName "NetPulse"
@@ -17,7 +17,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=installer
-OutputBaseFilename=NetPulse-Setup-1.1.9
+OutputBaseFilename=NetPulse-Setup-1.2.0
 SetupIconFile=app.ico
 Compression=lzma2/max
 SolidCompression=yes

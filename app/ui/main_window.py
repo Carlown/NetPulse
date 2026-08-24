@@ -2,11 +2,18 @@
 import os
 import sys
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QCursor, QGuiApplication, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import QSystemTrayIcon
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve,
+                            QParallelAnimationGroup, QPoint,
+                            QPropertyAnimation, QSize, Qt, QTimer)
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView,
+                               QAbstractScrollArea, QAbstractSpinBox, QComboBox,
+                               QGraphicsOpacityEffect, QLabel, QLineEdit,
+                               QPlainTextEdit, QProgressBar, QSlider,
+                               QStackedWidget, QSystemTrayIcon, QTextEdit)
 from qfluentwidgets import FluentIcon as FIF
-from qfluentwidgets import FluentWindow, NavigationItemPosition, RoundMenu, Action, isDarkTheme
+from qfluentwidgets import (Action, FluentWindow, NavigationItemPosition,
+                            RoundMenu, SwitchButton)
 
 from app.services.settings import settings
 from app.ui.busy_overlay import BusyOverlay
@@ -20,6 +27,10 @@ from app.ui.stress_view import StressView
 
 MON_ICON = getattr(FIF, "DIAGNOSTICS", getattr(FIF, "HEART", FIF.DEVELOPER_TOOLS))
 PLUGIN_ICON = getattr(FIF, "APPLICATION", FIF.DEVELOPER_TOOLS)
+PAGE_EXIT_MS = 150
+PAGE_TRANSITION_MS = 520
+CONTROL_REVEAL_MS = 560
+MAX_STAGGER_SPAN_MS = 1500
 
 
 def _get_icon_path():
@@ -38,6 +49,11 @@ class MainWindow(FluentWindow):
         self.resize(self._default_size)
         self.setMinimumSize(self._minimum_size)
         self._first_show = True
+        self._control_reveals = []
+        self._nav_reveal = None
+        self._pending_reveal_interface = None
+        self._reveal_serial = 0
+        self._page_animations_enabled = bool(settings.animations_enabled)
 
         self.dashboard = DashboardView(self)
         self.stress = StressView(self)
@@ -47,6 +63,10 @@ class MainWindow(FluentWindow):
         self.settingsView = SettingsView(self)
 
         self.init_navigation()
+        self.stackedWidget.setAnimationEnabled(
+            self._page_animations_enabled)
+        self.stackedWidget.view.aniFinished.connect(
+            self._on_page_transition_finished)
         self.init_window()
         self._init_tray()
         self._init_shortcuts()
@@ -182,9 +202,7 @@ class MainWindow(FluentWindow):
         tray_menu.addAction(quit_action)
 
         self.tray_icon.activated.connect(self._on_tray_activated)
-        # 启动时不注册托盘图标。Windows 只有在“新图标第一次出现”时
-        # 才会弹出系统自带的“图标已被隐藏到通知区域”提示，
-        # 所以要等到首次关闭到托盘时再 show()。
+        self.tray_icon.show()
 
     def _init_shortcuts(self):
         """注册全局页面快捷键，并保存引用避免被 Qt 回收。"""
@@ -254,14 +272,12 @@ class MainWindow(FluentWindow):
         if settings.minimize_to_tray and QSystemTrayIcon.isSystemTrayAvailable():
             event.ignore()
             self.hide()
-            # 先让窗口真正消失，再注册托盘图标。
-            # 资源管理器的“图标已隐藏到通知区域”提示，依赖窗口消失后的 NIM_ADD。
             QTimer.singleShot(0, self._minimize_to_tray)
         else:
             event.accept()
 
     def _minimize_to_tray(self):
-        """窗口隐藏后再注册托盘图标，并在首次给出提示。"""
+        """确保托盘图标可用，并在首次最小化时给出提示。"""
         first_icon = not self.tray_icon.isVisible()
         if first_icon:
             self.tray_icon.show()
@@ -294,6 +310,297 @@ class MainWindow(FluentWindow):
             self._show_from_tray()
         self.switchTo(widget)
 
+    def switchTo(self, interface):
+        """Switch pages with a visible upward entrance and content reveal."""
+        current = self.stackedWidget.currentWidget()
+        pending = self._pending_reveal_interface
+        if pending is interface or (pending is None and current is interface):
+            return
+
+        # Clicking the page that is currently exiting should reverse the
+        # transition instead of letting the other page flash into view.
+        if pending is not None and current is interface:
+            self._stop_page_transition()
+
+        self._clear_control_reveals()
+        self._clear_reveal("_nav_reveal")
+        self._pending_reveal_interface = interface
+        self._reveal_serial += 1
+        reveal_serial = self._reveal_serial
+
+        if isinstance(interface, QAbstractScrollArea):
+            interface.verticalScrollBar().setValue(0)
+
+        if self._page_animations_enabled:
+            # Hide the destination controls before the stacked widget can
+            # paint them. Final positions are captured after page layout.
+            self._prepare_control_reveals(interface, reveal_serial)
+        if self.stackedWidget.isAnimationEnabled():
+            self.stackedWidget.view.setCurrentWidget(
+                interface, duration=PAGE_TRANSITION_MS)
+            delay = PAGE_EXIT_MS - 10
+        else:
+            self.stackedWidget.view.setCurrentWidget(interface, duration=0)
+            self._pending_reveal_interface = None
+            delay = 0
+
+        if self._page_animations_enabled:
+            QTimer.singleShot(
+                delay,
+                lambda: self._start_control_reveals(reveal_serial))
+            self._animate_navigation_reveal(interface.objectName())
+
+    def set_page_animations_enabled(self, enabled: bool):
+        """Immediately enable or disable all main page transition effects."""
+        enabled = bool(enabled)
+        if not enabled:
+            self._stop_page_transition()
+            self._reveal_serial += 1
+            self._pending_reveal_interface = None
+            self._clear_control_reveals()
+            self._clear_reveal("_nav_reveal")
+        self._page_animations_enabled = enabled
+        self.stackedWidget.setAnimationEnabled(enabled)
+
+    def _stop_page_transition(self):
+        """Stop the transition across supported Fluent Widgets versions."""
+        view = self.stackedWidget.view
+        stop_animation = getattr(view, "_stopAnimation", None)
+        if callable(stop_animation):
+            stop_animation()
+            return
+
+        animation = getattr(view, "_ani", None)
+        if (animation is None
+                or animation.state() != QAbstractAnimation.State.Running):
+            return
+        next_index = getattr(view, "_nextIndex", None)
+        animation.stop()
+        try:
+            animation.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        if isinstance(next_index, int) and 0 <= next_index < view.count():
+            QStackedWidget.setCurrentIndex(view, next_index)
+        view.aniFinished.emit()
+
+    def _on_page_transition_finished(self):
+        if self.stackedWidget.currentWidget() is self._pending_reveal_interface:
+            self._pending_reveal_interface = None
+
+    def _prepare_control_reveals(self, interface, reveal_serial: int):
+        """Synchronously hide destination controls before the page is painted."""
+        if reveal_serial != self._reveal_serial:
+            return
+        targets = self._collect_reveal_targets(interface)
+        if not targets:
+            return
+
+        for widget in targets:
+            if widget.graphicsEffect() is not None:
+                continue
+            effect = QGraphicsOpacityEffect(widget)
+            effect.setOpacity(0.0)
+            widget.setGraphicsEffect(effect)
+
+            group = QParallelAnimationGroup(self)
+            opacity = QPropertyAnimation(effect, b"opacity", group)
+            opacity.setStartValue(0.0)
+            opacity.setEndValue(1.0)
+            opacity.setDuration(CONTROL_REVEAL_MS)
+            opacity.setEasingCurve(QEasingCurve.Type.OutCubic)
+            movement = QPropertyAnimation(widget, b"pos", group)
+            movement.setDuration(CONTROL_REVEAL_MS)
+            movement.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(opacity)
+            group.addAnimation(movement)
+
+            state = [widget, effect, group, movement, None, reveal_serial]
+            self._control_reveals.append(state)
+            group.finished.connect(
+                lambda state=state: self._finish_control_reveal(state))
+
+    def _start_control_reveals(self, reveal_serial: int):
+        """Animate prepared controls from their freshly laid-out positions."""
+        if reveal_serial != self._reveal_serial:
+            return
+        states = [state for state in self._control_reveals
+                  if state[5] == reveal_serial]
+        if not states:
+            return
+
+        # Capture every final position before moving any control so sibling
+        # layouts cannot influence positions captured later in this pass.
+        for state in states:
+            widget, _effect, _group, movement, _end_pos, _serial = state
+            try:
+                end_pos = widget.pos()
+                start_pos = end_pos + QPoint(0, 12)
+                state[4] = end_pos
+                movement.setStartValue(start_pos)
+                movement.setEndValue(end_pos)
+            except RuntimeError:
+                self._finish_control_reveal(state)
+
+        states = [state for state in states if state in self._control_reveals]
+        stagger = max(28, min(
+            85, MAX_STAGGER_SPAN_MS // max(1, len(states) - 1)))
+        for index, state in enumerate(states):
+            try:
+                state[0].move(state[3].startValue())
+            except RuntimeError:
+                self._finish_control_reveal(state)
+                continue
+            QTimer.singleShot(
+                index * stagger,
+                lambda state=state: self._start_control_reveal(state))
+
+    def _collect_reveal_targets(self, interface):
+        """Collect user-visible controls without descending into internals."""
+        atomic_types = (
+            QAbstractButton, QAbstractItemView, QAbstractSpinBox, QComboBox,
+            QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QSlider,
+            SwitchButton, QTextEdit,
+        )
+        targets = []
+        seen = set()
+
+        def add(widget):
+            if (widget in seen or not widget.isVisibleTo(interface)
+                    or widget.objectName().startswith("qt_")):
+                return
+            seen.add(widget)
+            targets.append(widget)
+
+        def walk_layout(layout):
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                if item.layout() is not None:
+                    walk_layout(item.layout())
+                elif item.widget() is not None:
+                    walk_widget(item.widget())
+
+        def walk_widget(widget, is_root=False):
+            # QStackedWidget marks an unselected page itself as hidden. Walk
+            # that root once, while still filtering hidden child tab pages.
+            if (widget is None
+                    or (not is_root and not widget.isVisibleTo(interface))):
+                return
+            if isinstance(widget, atomic_types):
+                add(widget)
+                return
+            if isinstance(widget, QStackedWidget):
+                walk_widget(widget.currentWidget())
+                return
+            if isinstance(widget, QAbstractScrollArea):
+                content = widget.widget() if hasattr(widget, "widget") else None
+                if content is not None and content.layout() is not None:
+                    walk_layout(content.layout())
+                else:
+                    add(widget)
+                return
+            if widget.layout() is not None:
+                walk_layout(widget.layout())
+            else:
+                add(widget)
+
+        root = interface
+        if isinstance(interface, QAbstractScrollArea) and hasattr(interface, "widget"):
+            root = interface.widget() or interface
+        walk_widget(root, True)
+        return targets
+
+    def _start_control_reveal(self, state):
+        if (state not in self._control_reveals
+                or state[5] != self._reveal_serial):
+            return
+        try:
+            state[2].start()
+        except RuntimeError:
+            self._finish_control_reveal(state)
+
+    def _finish_control_reveal(self, state):
+        if state not in self._control_reveals:
+            return
+        self._control_reveals.remove(state)
+        widget, effect, _group, _movement, end_pos, _serial = state
+        try:
+            if end_pos is not None:
+                widget.move(end_pos)
+            effect.setOpacity(1.0)
+            if widget.graphicsEffect() is effect:
+                widget.setGraphicsEffect(None)
+        except RuntimeError:
+            pass
+
+    def _clear_control_reveals(self):
+        states, self._control_reveals = self._control_reveals, []
+        for widget, effect, group, _movement, end_pos, _serial in states:
+            group.stop()
+            try:
+                if end_pos is not None:
+                    widget.move(end_pos)
+                effect.setOpacity(1.0)
+                if widget.graphicsEffect() is effect:
+                    widget.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
+
+    def _animate_navigation_reveal(self, route_key: str):
+        """Give the selected navigation icon a compact reveal animation."""
+        try:
+            item = self.navigationInterface.panel.items.get(route_key)
+            widget = item.widget if item is not None else None
+        except Exception:
+            widget = None
+        if widget is not None:
+            self._start_reveal(widget, "_nav_reveal", 0.12, 480)
+
+    def _start_reveal(self, widget, state_name: str,
+                      start_opacity: float, duration: int):
+        if widget.graphicsEffect() is not None:
+            return
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(start_opacity)
+        widget.setGraphicsEffect(effect)
+
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        animation.setStartValue(start_opacity)
+        animation.setEndValue(1.0)
+        animation.setDuration(duration)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        state = (widget, effect, animation)
+        setattr(self, state_name, state)
+        animation.finished.connect(
+            lambda: self._finish_reveal(state_name, state))
+        animation.start()
+
+    def _finish_reveal(self, state_name: str, state):
+        if getattr(self, state_name, None) is not state:
+            return
+        setattr(self, state_name, None)
+        widget, effect, _animation = state
+        try:
+            effect.setOpacity(1.0)
+            if widget.graphicsEffect() is effect:
+                widget.setGraphicsEffect(None)
+        except RuntimeError:
+            pass
+
+    def _clear_reveal(self, state_name: str):
+        state = getattr(self, state_name, None)
+        if state is None:
+            return
+        setattr(self, state_name, None)
+        widget, effect, animation = state
+        animation.stop()
+        try:
+            effect.setOpacity(1.0)
+            if widget.graphicsEffect() is effect:
+                widget.setGraphicsEffect(None)
+        except RuntimeError:
+            pass
+
     def go_dashboard(self):
         self._go_to(self.dashboard)
 
@@ -320,13 +627,28 @@ class MainWindow(FluentWindow):
             overlay.setGeometry(0, 0, self.width(), self.height())
 
     def showEvent(self, event):
-        """窗口首次显示时创建 overlay 并确保尺寸正确。"""
+        """窗口首次显示时播放当前页面动画并确保尺寸正确。"""
         super().showEvent(event)
         if self._first_show:
             self._first_show = False
             # 多次延迟强制确保窗口尺寸正确（应对 FluentWindow 初始化布局可能的 resize）
             for delay in [0, 30, 100, 250, 500]:
                 QTimer.singleShot(delay, self._ensure_correct_size)
+
+            # showEvent runs before the first paint, so the initial page can be
+            # hidden synchronously without exposing its text for one frame.
+            self._clear_control_reveals()
+            self._clear_reveal("_nav_reveal")
+            self._pending_reveal_interface = None
+            self._reveal_serial += 1
+            reveal_serial = self._reveal_serial
+            interface = self.stackedWidget.currentWidget()
+            if interface is not None and self._page_animations_enabled:
+                self._prepare_control_reveals(interface, reveal_serial)
+                QTimer.singleShot(
+                    60,
+                    lambda: self._start_control_reveals(reveal_serial))
+                self._animate_navigation_reveal(interface.objectName())
         self._ensure_overlay()
     
     def _ensure_correct_size(self):

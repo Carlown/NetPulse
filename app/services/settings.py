@@ -17,6 +17,7 @@ class AppSettings:
         "theme",
         "theme_color",
         "language",
+        "animations_enabled",
         "default_threads",
         "default_timeout_ms",
         "default_rate",
@@ -38,6 +39,7 @@ class AppSettings:
         "theme": "light",             # dark / light
         "theme_color": "#0078D4",     # 主题强调色（按钮、进度条等）
         "language": "auto",            # auto（跟随系统）/ zh-CN / en-US
+        "animations_enabled": True,    # 页面切换与控件浮现动画
         "_lang_migrated": True,        # 新安装无需执行旧版固定语言迁移
         "default_threads": 8,
         "default_timeout_ms": 5000,
@@ -248,7 +250,8 @@ class AppSettings:
             if type(value) is not int or not lo <= value <= hi:
                 raise ValueError(f"{key} must be an integer in [{lo}, {hi}]")
             return value
-        if key in ("minimize_to_tray", "auto_check_updates"):
+        if key in ("animations_enabled", "minimize_to_tray",
+                   "auto_check_updates"):
             if type(value) is not bool:
                 raise ValueError(f"{key} must be a boolean")
             return value
