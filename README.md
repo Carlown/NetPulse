@@ -73,7 +73,7 @@ pyinstaller --name NetPulse --icon app.ico --windowed --onefile --add-data "app.
 
 # 2. Create the installer (requires Inno Setup 7)
 ISCC.exe installer.iss
-# Output: installer/NetPulse-Setup-1.1.8.exe
+# Output: installer/NetPulse-Setup-1.1.9.exe
 ```
 
 ### Tech Stack
@@ -153,7 +153,7 @@ pyinstaller --name NetPulse --icon app.ico --windowed --onefile --add-data "app.
 
 # 2. 制作安装程序（需安装 Inno Setup 7）
 ISCC.exe installer.iss
-# 产物位于 installer/NetPulse-Setup-1.1.8.exe
+# 产物位于 installer/NetPulse-Setup-1.1.9.exe
 ```
 
 ### 技术栈

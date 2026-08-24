@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.9] - 2026-08-24
+
+### Changed
+
+- Removed the unused "Copy Public Address" button from collaborative host controls.
+- Kept invite-code and LAN-address copy actions unchanged.
+
 ## [1.1.8] - 2026-08-24
 
 ### Fixed

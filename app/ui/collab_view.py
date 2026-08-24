@@ -110,14 +110,11 @@ class CollabView(ScrollArea):
         self.addrLabel.hide()  # 初始隐藏
         hl.addWidget(self.addrLabel)
         addr_row = QHBoxLayout()
-        self.copyPubBtn = PushButton(L("复制公网地址", "Copy Public Address"), self.hostCard)
-        self.copyPubBtn.clicked.connect(self._copy_public)
         self.copyLanBtn = PushButton(L("复制局域网地址", "Copy LAN Address"), self.hostCard)
         self.copyLanBtn.clicked.connect(self._copy_lan)
         self.adminBtn = PushButton(L("以管理员重启并放行防火墙", "Restart as admin to open firewall"), self.hostCard)
         self.adminBtn.clicked.connect(self._restart_as_admin)
         self.adminBtn.hide()
-        addr_row.addWidget(self.copyPubBtn)
         addr_row.addWidget(self.copyLanBtn)
         addr_row.addWidget(self.adminBtn)
         addr_row.addStretch(1)
@@ -268,7 +265,6 @@ class CollabView(ScrollArea):
                 f"中继模式：通过 {relay_desc} 中转，支持外网节点加入，无需部署服务器、无需公网 IP。",
                 f"Relay mode: routed via public MQTT broker, WAN nodes supported, no server setup needed."))
             self.addrLabel.hide()
-            self.copyPubBtn.hide()
             self.copyLanBtn.hide()
             self.adminBtn.hide()
         else:
@@ -280,7 +276,6 @@ class CollabView(ScrollArea):
                 self.addrLabel.show()
             else:
                 self.addrLabel.hide()
-            self.copyPubBtn.hide()  # 局域网模式不显示公网地址
             self.copyLanBtn.hide()  # 生成邀请码后才显示复制按钮
             self.adminBtn.hide()  # 局域网模式默认不需要特殊防火墙配置（子网内通常放行）
 
@@ -336,8 +331,6 @@ class CollabView(ScrollArea):
             relay_addr = collab_server.relay_addr_display()
             self._server_log(L(f"已生成邀请码 {code}（中继模式，通过 {relay_addr} 中转）",
                                f"Invite generated: {code} (relay via {relay_addr})"))
-            # 中继模式显示公网复制按钮
-            self.copyPubBtn.show()
             self.copyLanBtn.hide()
         else:
             # 直连局域网模式：只获取局域网IP，不探测公网
@@ -423,9 +416,6 @@ class CollabView(ScrollArea):
                            f"Firewall: TCP {PORT} not allowed yet; click the button below to elevate"))
         self.addrLabel.setText("\n".join(lines))
         self.addrLabel.show()  # 有内容了，显示地址标签
-        # 显示复制按钮（如果有公网地址显示公网复制，否则只显示局域网复制）
-        if self._pub_addr:
-            self.copyPubBtn.show()
         self.copyLanBtn.show()
 
     def _restart_as_admin(self):
@@ -462,15 +452,6 @@ class CollabView(ScrollArea):
         InfoBar.success(L("已复制", "Copied"),
                         L(f"邀请码 {code} 已复制到剪贴板", f"Invite code {code} copied to clipboard"),
                         parent=self.window())
-
-    def _copy_public(self):
-        addr = getattr(self, "_pub_addr", "")
-        if not addr:
-            InfoBar.warning(L("暂无", "Unavailable"), L("尚未生成外网地址", "No WAN address yet"),
-                            parent=self.window())
-            return
-        QGuiApplication.clipboard().setText(addr)
-        InfoBar.success(L("已复制", "Copied"), addr, parent=self.window())
 
     def _copy_lan(self):
         addr = getattr(self, "_lan_addr", "")
