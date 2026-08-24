@@ -73,6 +73,8 @@ def _http_req_bytes(r) -> int:
             n += len(k) + len(str(v)) + 4        # "Key: Value\r\n"
         body = req.body
         if body:
+            if isinstance(body, str):
+                body = body.encode("utf-8")
             n += len(body)
         return n
     except Exception:
@@ -277,13 +279,23 @@ class StressEngine(QObject):
             return False, _oserr_str(e)
 
     def _udp_once(self, c, payload, timeout):
+        # Resolve both address families so bracketed/unbracketed IPv6 targets
+        # work the same way as TCP and HTTP targets.
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.settimeout(timeout)
-                s.sendto(payload, (c["target"], c["port"]))
-            return True, None
+            infos = socket.getaddrinfo(c["target"], c["port"], socket.AF_UNSPEC,
+                                       socket.SOCK_DGRAM)
         except OSError as e:
             return False, _oserr_str(e)
+        last_error = None
+        for family, socktype, proto, _canonname, sockaddr in infos:
+            try:
+                with socket.socket(family, socktype, proto) as s:
+                    s.settimeout(timeout)
+                    s.sendto(payload, sockaddr)
+                return True, None
+            except OSError as e:
+                last_error = e
+        return False, _oserr_str(last_error) if last_error else "conn"
 
     def _icmp_once(self, c, timeout):
         try:

@@ -61,23 +61,37 @@ def _connect_tcp(host, port, timeout=8):
 def _parse_host_port(host_str, default_port=PORT):
     """解析 host:port 格式，支持 [IPv6]:port。"""
     host_str = (host_str or "").strip()
+    if not host_str:
+        raise ValueError("host is required")
     if host_str.startswith("[") and "]" in host_str:
         inside, _, rest = host_str.partition("]")
         if not inside or (rest and not rest.startswith(":")):
             raise ValueError("invalid bracketed host")
         host = inside.strip("[")
+        if not host:
+            raise ValueError("host is required")
         p = rest.lstrip(":")
         if not p:
+            # A trailing colon is almost always a typo.  Accept the omitted
+            # port (`[::1]`) but reject the malformed `[::1]:` form.
+            if rest:
+                raise ValueError("port must be between 1 and 65535")
             port = default_port
-        elif p.isdigit() and 0 < int(p) < 65536:
-            port = int(p)
-        else:
+        elif not p.isdigit() or not 0 < int(p) < 65536:
             raise ValueError("port must be between 1 and 65535")
+        else:
+            port = int(p)
         return host, port
-    elif host_str.count(":") == 1 and not host_str.replace(".", "").replace(":", "").isalpha():
-        h, _, p = host_str.rpartition(":")
-        if p.isdigit() and 0 < int(p) < 65536:
-            return h, int(p)
+    if host_str.count(":") == 1:
+        # A single colon is the host:port form.  Do not silently treat an
+        # invalid port as part of the hostname; that caused confusing DNS
+        # errors for inputs such as `server:abc`.
+        host, _, port_text = host_str.rpartition(":")
+        if not host or not port_text.isdigit() or not 0 < int(port_text) < 65536:
+            raise ValueError("port must be between 1 and 65535")
+        return host, int(port_text)
+    # Unbracketed IPv6 contains multiple colons.  It has no unambiguous port;
+    # use the default and let getaddrinfo validate the address.
     return host_str, default_port
 
 

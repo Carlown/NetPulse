@@ -5,7 +5,7 @@ import requests
 from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 REPO = "Carlown/NetPulse"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 LATEST_URL = f"https://github.com/{REPO}/releases/latest"

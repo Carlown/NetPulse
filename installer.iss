@@ -1,10 +1,11 @@
 ; NetPulse Installer Script (Inno Setup 7)
 ; 中英双语安装程序
 #define MyAppName "NetPulse"
-#define MyAppVersion "1.1.7"
+#define MyAppVersion "1.1.8"
 #define MyAppPublisher "NetPulse"
 #define MyAppExeName "NetPulse.exe"
 #define MyAppDirName "NetPulse"
+#define MyAppAUMID "NetPulse.App"
 
 [Setup]
 AppId={{8F4A2C1E-9B3D-4E6A-B5C7-1A2B3C4D5E6F}
@@ -16,7 +17,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=installer
-OutputBaseFilename=NetPulse-Setup-1.1.7
+OutputBaseFilename=NetPulse-Setup-1.1.8
 SetupIconFile=app.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -44,8 +45,8 @@ Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:Add
 Source: "dist\{#MyAppDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "{cm:ProgramComment}"
-Name: "{autodesktop}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "{cm:ProgramComment}"; Tasks: desktopicon
+Name: "{autoprograms}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "{cm:ProgramComment}"; AppUserModelID: "{#MyAppAUMID}"
+Name: "{autodesktop}\NetPulse"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Comment: "{cm:ProgramComment}"; Tasks: desktopicon; AppUserModelID: "{#MyAppAUMID}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:RunApp}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

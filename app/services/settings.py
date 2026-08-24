@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import tempfile
+import threading
 import time
 
 
@@ -77,29 +78,34 @@ class AppSettings:
         # 否则“恢复默认”可能恢复到已经被改过的对象。
         self._data = copy.deepcopy(self.DEFAULTS)
         self._last_error = ""
+        # Settings can be changed by UI callbacks and background plugin/collab
+        # threads at the same time.  Serialize both memory updates and the
+        # atomic file replacement so one writer cannot overwrite another.
+        self._lock = threading.RLock()
         self.load()
 
     def load(self):
-        try:
-            if os.path.exists(self.path):
-                with open(self.path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                clean = self._sanitize_loaded_data(raw)
-                self._data.update(clean)
-                needs_save = clean != raw
-                # 一次性迁移：旧配置的固定语言改为跟随系统（仅在从未迁移过时执行）
-                if raw.get("_lang_migrated") is not True:
-                    self._data["language"] = "auto"
-                    self._data["_lang_migrated"] = True
-                    needs_save = True
-                if needs_save:
-                    if not self.save():
-                        return False
-            self._last_error = ""
-            return True
-        except Exception as e:
-            self._last_error = str(e)
-            return False
+        with self._lock:
+            try:
+                if os.path.exists(self.path):
+                    with open(self.path, "r", encoding="utf-8") as f:
+                        raw = json.load(f)
+                    clean = self._sanitize_loaded_data(raw)
+                    self._data.update(clean)
+                    needs_save = clean != raw
+                    # 一次性迁移：旧配置的固定语言改为跟随系统（仅在从未迁移过时执行）
+                    if raw.get("_lang_migrated") is not True:
+                        self._data["language"] = "auto"
+                        self._data["_lang_migrated"] = True
+                        needs_save = True
+                    if needs_save:
+                        if not self.save():
+                            return False
+                self._last_error = ""
+                return True
+            except Exception as e:
+                self._last_error = str(e)
+                return False
 
     @classmethod
     def _sanitize_loaded_data(cls, raw):
@@ -184,38 +190,42 @@ class AppSettings:
                     pass
 
     def save(self):
-        try:
-            self._atomic_write_json(self.path, self._data)
-            self._last_error = ""
-            return True
-        except Exception as e:
-            self._last_error = str(e)
-            return False
+        with self._lock:
+            try:
+                self._atomic_write_json(self.path, self._data)
+                self._last_error = ""
+                return True
+            except Exception as e:
+                self._last_error = str(e)
+                return False
 
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        try:
-            return self._data[name]
-        except KeyError:
-            return self.DEFAULTS.get(name)
+        with self._lock:
+            try:
+                return self._data[name]
+            except KeyError:
+                return self.DEFAULTS.get(name)
 
     def set(self, name, value):
-        existed = name in self._data
-        old_value = self._data.get(name)
-        self._data[name] = value
-        if self.save():
-            return True
-        # 落盘失败时回滚内存状态，避免界面看似已保存、重启后却丢失。
-        if existed:
-            self._data[name] = old_value
-        else:
-            self._data.pop(name, None)
-        return False
+        with self._lock:
+            existed = name in self._data
+            old_value = self._data.get(name)
+            self._data[name] = value
+            if self.save():
+                return True
+            # 落盘失败时回滚内存状态，避免界面看似已保存、重启后却丢失。
+            if existed:
+                self._data[name] = old_value
+            else:
+                self._data.pop(name, None)
+            return False
 
     @property
     def last_error(self):
-        return self._last_error
+        with self._lock:
+            return self._last_error
 
     @classmethod
     def _validate_safe_value(cls, key, value):
@@ -246,11 +256,12 @@ class AppSettings:
 
     def safe_snapshot(self):
         """返回适合导出/诊断的脱敏偏好副本。"""
-        result = {}
-        for key in self.SAFE_BACKUP_KEYS:
-            value = self._data.get(key, self.DEFAULTS[key])
-            result[key] = self._validate_safe_value(key, copy.deepcopy(value))
-        return result
+        with self._lock:
+            result = {}
+            for key in self.SAFE_BACKUP_KEYS:
+                value = self._data.get(key, self.DEFAULTS[key])
+                result[key] = self._validate_safe_value(key, copy.deepcopy(value))
+            return result
 
     def export_backup(self, path, app_version=""):
         """导出版本化、脱敏的设置备份，返回写出的安全设置数量。"""
@@ -292,39 +303,41 @@ class AppSettings:
 
     def import_backup(self, path):
         """校验并导入设置备份；提交前把完整当前设置原子保存为 settings.json.bak。"""
-        if os.path.getsize(path) > 1024 * 1024:
-            raise ValueError("backup file is larger than 1 MiB")
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        validated, ignored = self._validate_backup_payload(payload)
+        with self._lock:
+            if os.path.getsize(path) > 1024 * 1024:
+                raise ValueError("backup file is larger than 1 MiB")
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            validated, ignored = self._validate_backup_payload(payload)
 
-        candidate = copy.deepcopy(self._data)
-        candidate.update(validated)
-        backup_path = self.path + ".bak"
-        # 先完成完整本地备份；若备份失败，则绝不覆盖当前设置。
-        self._atomic_write_json(backup_path, self._data)
-        self._atomic_write_json(self.path, candidate)
-        self._data = candidate
-        self._last_error = ""
-        return {
-            "applied": sorted(validated),
-            "ignored": ignored,
-            "backup_path": backup_path,
-        }
+            candidate = copy.deepcopy(self._data)
+            candidate.update(validated)
+            backup_path = self.path + ".bak"
+            # 先完成完整本地备份；若备份失败，则绝不覆盖当前设置。
+            self._atomic_write_json(backup_path, self._data)
+            self._atomic_write_json(self.path, candidate)
+            self._data = candidate
+            self._last_error = ""
+            return {
+                "applied": sorted(validated),
+                "ignored": ignored,
+                "backup_path": backup_path,
+            }
 
     def reset_preferences(self):
         """仅恢复可备份的普通偏好，不触碰授权、Token、插件数据等敏感状态。"""
-        candidate = copy.deepcopy(self._data)
-        changed = []
-        for key in self.SAFE_BACKUP_KEYS:
-            default = copy.deepcopy(self.DEFAULTS[key])
-            if candidate.get(key) != default:
-                changed.append(key)
-            candidate[key] = default
-        self._atomic_write_json(self.path, candidate)
-        self._data = candidate
-        self._last_error = ""
-        return sorted(changed)
+        with self._lock:
+            candidate = copy.deepcopy(self._data)
+            changed = []
+            for key in self.SAFE_BACKUP_KEYS:
+                default = copy.deepcopy(self.DEFAULTS[key])
+                if candidate.get(key) != default:
+                    changed.append(key)
+                candidate[key] = default
+            self._atomic_write_json(self.path, candidate)
+            self._data = candidate
+            self._last_error = ""
+            return sorted(changed)
 
 
 settings = AppSettings()

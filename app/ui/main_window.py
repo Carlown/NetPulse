@@ -113,7 +113,8 @@ class MainWindow(FluentWindow):
         rec_path = rec.path if rec else ""
         icon = resolve_plugin_icon(plugin, pid, rec_path) or PLUGIN_ICON
         try:
-            self.addSubInterface(widget, icon, plugin.page_title())
+            self.addSubInterface(widget, icon, plugin.page_title(),
+                                 NavigationItemPosition.SCROLL)
         except Exception as e:
             from app.services.logger import log
             log.error(L(f"插件页面注册失败：{pid} — {e}",
@@ -181,7 +182,9 @@ class MainWindow(FluentWindow):
         tray_menu.addAction(quit_action)
 
         self.tray_icon.activated.connect(self._on_tray_activated)
-        self.tray_icon.show()
+        # 启动时不注册托盘图标。Windows 只有在“新图标第一次出现”时
+        # 才会弹出系统自带的“图标已被隐藏到通知区域”提示，
+        # 所以要等到首次关闭到托盘时再 show()。
 
     def _init_shortcuts(self):
         """注册全局页面快捷键，并保存引用避免被 Qt 回收。"""
@@ -248,21 +251,40 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, event):
         """重写关闭事件，根据配置决定最小化到托盘还是退出。"""
-        if settings.minimize_to_tray and self.tray_icon.isVisible():
+        if settings.minimize_to_tray and QSystemTrayIcon.isSystemTrayAvailable():
             event.ignore()
             self.hide()
-            # 托盘提示永久只弹一次（标记持久化，重启软件后不再提示）
-            if not settings.tray_notified:
-                settings.set("tray_notified", True)
-                self.tray_icon.showMessage(
-                    "NetPulse",
-                    L("程序已最小化到托盘，右键托盘图标可退出",
-                      "Minimized to tray, right-click tray icon to quit"),
-                    QSystemTrayIcon.Information,
-                    2500
-                )
+            # 先让窗口真正消失，再注册托盘图标。
+            # 资源管理器的“图标已隐藏到通知区域”提示，依赖窗口消失后的 NIM_ADD。
+            QTimer.singleShot(0, self._minimize_to_tray)
         else:
             event.accept()
+
+    def _minimize_to_tray(self):
+        """窗口隐藏后再注册托盘图标，并在首次给出提示。"""
+        first_icon = not self.tray_icon.isVisible()
+        if first_icon:
+            self.tray_icon.show()
+        if settings.tray_notified or getattr(self, "_tray_hint_scheduled", False):
+            return
+        self._tray_hint_scheduled = True
+        # 等托盘图标真正注册到通知区域：系统溢出提示先弹，我们自己的气泡作兜底。
+        QTimer.singleShot(800 if first_icon else 200, self._show_first_tray_hint)
+
+    def _show_first_tray_hint(self):
+        """托盘图标注册完成后，永久只弹一次气泡提示。"""
+        if settings.tray_notified:
+            return
+        settings.set("tray_notified", True)
+        if not self.tray_icon.isVisible() or not QSystemTrayIcon.supportsMessages():
+            return
+        self.tray_icon.showMessage(
+            "NetPulse",
+            L("程序已最小化到托盘，右键托盘图标可退出",
+              "Minimized to tray, right-click tray icon to quit"),
+            QSystemTrayIcon.Information,
+            5000
+        )
 
     def _go_to(self, widget):
         """从普通窗口或托盘状态直达指定页面。"""

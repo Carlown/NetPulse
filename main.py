@@ -15,6 +15,18 @@ from PySide6.QtWidgets import QApplication
 from app.ui.splash import create_splash
 
 SINGLE_INSTANCE_KEY = "NetPulse_SingleInstance_Key"
+APP_USER_MODEL_ID = "NetPulse.App"
+
+
+def _set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
+    """绑定稳定的 AUMID，否则 Win10/11 会静默丢掉托盘气泡/Toast。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
 
 
 def resource_path(rel: str) -> str:
@@ -38,8 +50,14 @@ def is_already_running() -> bool:
 
 
 def main():
+    # AUMID 必须在创建任何窗口之前设置，否则 Win10/11 会静默丢掉托盘气泡。
+    _set_app_user_model_id()
+
     # ① 第一时间创建 QApplication 并显示启动画面
     app = QApplication(sys.argv)
+    app.setApplicationName("NetPulse")
+    app.setApplicationDisplayName("NetPulse")
+    app.setOrganizationName("NetPulse")
     splash = create_splash()  # 这是双击后用户看到的第一样东西
 
     # ② 再做单实例检测（splash 已经在屏幕上了）

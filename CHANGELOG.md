@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.8] - 2026-08-24
+
+### Fixed
+
+- Hardened concurrent settings writes to prevent background tasks from overwriting each other's changes.
+- Improved collaborative host and port validation, including IPv6 support.
+- Fixed UDP testing for IPv6 targets and corrected HTTP request-body traffic accounting.
+- Completed English labels for the built-in CVE plugin.
+- Improved tray behavior with stable Windows app identity and safer delayed registration.
+- Kept dynamically loaded plugin pages in the scrollable navigation area.
+
 ## [1.1.7] - 2026-08-23
 
 ### Fixed
