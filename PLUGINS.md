@@ -62,7 +62,7 @@ class Plugin(NetPulsePlugin):
 ```
 
 - Every `name` / `description` / label field accepts a `(中文, English)` tuple and follows the UI language automatically.
-- `icon` may be a built-in [FluentIcon](https://qfluentwidgets.com/pages/icons/) name (e.g. `"SPEED_HIGH"`, `"CLOUD"`) or a relative image path.
+- `icon` may be a built-in [FluentIcon](https://qfluentwidgets.com/pages/icon/) name (e.g. `"SPEED_HIGH"`, `"CLOUD"`) or a relative image path.
 - `category` sets the marketplace filter type: `tool` (utilities), `protocol` (custom test protocols), `ui` (pages/widgets) or `other`. If omitted, it is auto-detected from what the plugin registers.
 
 ## Lifecycle Hooks
@@ -219,7 +219,7 @@ class Plugin(NetPulsePlugin):
 ```
 
 - `name` / `description` / 各处 label 都支持 `(中文, English)` 元组，自动跟随界面语言。
-- `icon` 可以是内置 [FluentIcon](https://qfluentwidgets.com/pages/icons/) 名（如 `"SPEED_HIGH"`、`"CLOUD"`）或相对路径的图片。
+- `icon` 可以是内置 [FluentIcon](https://qfluentwidgets.com/pages/icon/) 名（如 `"SPEED_HIGH"`、`"CLOUD"`）或相对路径的图片。
 - `category` 是市场筛选类型：`tool`（工具）、`protocol`（自定义协议）、`ui`（页面/界面）或 `other`（其他）。不填则按插件注册的能力自动识别。
 
 ## 生命周期钩子
