@@ -98,6 +98,26 @@
       "sha256": "8c88376fa0717f777f95a2f5620a8b3847d793610ecd4f76e7de65e5013e4c2f",
       "min_app": "1.0.7",
       "homepage": "https://github.com/Carlown/NetPulse"
+    },
+    {
+      "id": "main",
+      "name": [
+        "CVE-2026-49975 HTTP/2 PoC",
+        "CVE-2026-49975 HTTP/2 PoC"
+      ],
+      "version": "1.0",
+      "author": "NetPulse",
+      "description": [
+        "HTTP/2 Cookie 合并内存放大 PoC；先探测协议，每 30 秒探活并在失活时停止",
+        "HTTP/2 Cookie merge memory-amplification PoC with protocol detection and a 30s watchdog"
+      ],
+      "category": "tool",
+      "date": "2026-08-24",
+      "file": "main.py",
+      "sha256": "f65f67869739953bdbf08808dd4d16f67d767f0c76e7646cc794eed48f60f766",
+      "min_app": "1.0.7",
+      "homepage": "https://github.com/Carlown/NetPulse",
+      "publisher": "Carlown"
     }
   ]
 }
