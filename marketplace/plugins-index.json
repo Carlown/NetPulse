@@ -114,7 +114,7 @@
       "category": "tool",
       "date": "2026-08-24",
       "file": "cve_2026_49975.py",
-      "sha256": "36358db28c348f5666fa7f56362375d3373f816c26c03e4f7b3ddc7588749362",
+      "sha256": "4a489344070ed25a5637735c1e8f0cbd3f6901d907cd2079d659baa66135f37a",
       "min_app": "1.0.7",
       "homepage": "https://github.com/Carlown/NetPulse",
       "publisher": "Carlown"

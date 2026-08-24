@@ -8,6 +8,7 @@ when the endpoint stops answering, all attack sockets are closed.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -16,14 +17,53 @@ from urllib.parse import urlsplit
 from PySide6.QtCore import QObject, Signal
 
 
+def _tr(zh: str, en: str) -> str:
+    """Resolve plugin status text using the host application's language."""
+    from app.ui.i18n import L
+    return L(zh, en)
+
+
+_ENGINE_SHA256 = "5cc17982fc3876e454e4b301530bb37f6da9ac00ac943197ff31c529d25575a7"
+_ENGINE_URL = (
+    "https://raw.githubusercontent.com/Carlown/NetPulse/"
+    "master/plugins/cve_2026_49975/_poc.py"
+)
+
+
 def _load_engine():
+    """Load the PoC engine from a sibling file or its pinned official source.
+
+    Marketplace installation downloads one Python file.  The source plugin is
+    kept split for maintainability, so the installed copy falls back to the
+    matching, hash-verified engine source when the sibling is not present.
+    """
     path = Path(__file__).with_name("_poc.py")
-    spec = importlib.util.spec_from_file_location("netpulse_cve_2026_49975_engine", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    if path.is_file():
+        spec = importlib.util.spec_from_file_location(
+            "netpulse_cve_2026_49975_engine", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    try:
+        import requests
+        response = requests.get(_ENGINE_URL, timeout=10,
+                                headers={"User-Agent": "NetPulse"})
+        response.raise_for_status()
+        source = response.content
+        digest = hashlib.sha256(source).hexdigest()
+        if digest != _ENGINE_SHA256:
+            raise ImportError("PoC engine integrity check failed")
+        module = importlib.util.module_from_spec(
+            importlib.util.spec_from_loader(
+                "netpulse_cve_2026_49975_engine", loader=None))
+        exec(compile(source, _ENGINE_URL, "exec"), module.__dict__)
+        return module
+    except Exception as exc:
+        raise ImportError(
+            "PoC engine is unavailable; install the plugin while online") from exc
 
 
 _engine = _load_engine()
@@ -40,7 +80,8 @@ def _parse_target(raw: str):
         value = "http://" + value
     parsed = urlsplit(value)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError("目标必须是 http:// 或 https:// URL")
+        raise ValueError(_tr("目标必须是 http:// 或 https:// URL",
+                             "Target must be an http:// or https:// URL"))
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     path = parsed.path or "/"
     return parsed.hostname, port, parsed.scheme == "https", path
@@ -68,13 +109,15 @@ class _RunController:
     def _run(self, config):
         try:
             host, port, tls, path = config["host"], config["port"], config["tls"], config["path"]
-            self.emit(f"检测 HTTP/2：{host}:{port} …")
+            self.emit(_tr(f"检测 HTTP/2：{host}:{port} …",
+                          f"Checking HTTP/2: {host}:{port} …"))
             if self.stop_event.is_set():
                 return
             if not _engine.probe_http2(host, port, tls, timeout=5.0):
-                self.emit("未检测到可用的 HTTP/2 PING 响应，已停止")
+                self.emit(_tr("未检测到可用的 HTTP/2 PING 响应，已停止",
+                              "No usable HTTP/2 PING response was detected; stopped"))
                 return
-            self.emit("HTTP/2 检测通过，开始 PoC …")
+            self.emit(_tr("HTTP/2 检测通过，开始 PoC …", "HTTP/2 check passed; starting PoC …"))
             self._expected_connections = config["connections"]
             self.engine = _engine.AttackEngine(
                 host=host,
@@ -93,15 +136,17 @@ class _RunController:
             self.engine.start()
             interval = 30.0
             while not self.stop_event.wait(interval):
-                self.emit("30 秒探活：发送 HTTP/2 PING …")
+                self.emit(_tr("30 秒探活：发送 HTTP/2 PING …",
+                              "30-second liveness check: sending HTTP/2 PING …"))
                 if not _engine.probe_http2(host, port, tls, timeout=5.0):
-                    self.emit("探活失败，目标不可用，已停止 PoC")
+                    self.emit(_tr("探活失败，目标不可用，已停止 PoC",
+                                  "Liveness check failed; target unavailable, stopped PoC"))
                     self.stop()
                     return
-                self.emit("探活通过，继续保持 PoC")
+                self.emit(_tr("探活通过，继续保持 PoC", "Liveness check passed; PoC is still running"))
                 if (self.engine is None or self.engine.stop_event.is_set()
                         or not self.engine.is_alive()):
-                    self.emit("PoC 已完成")
+                    self.emit(_tr("PoC 已完成", "PoC completed"))
                     self.stop()
                     return
         finally:
@@ -110,14 +155,19 @@ class _RunController:
     def _on_engine_event(self, event):
         kind = event.get("kind")
         if kind == "started":
-            self.emit("已启动：连接={}，流={}，refs={}，payload={}B".format(
-                event["connections"], event["streams"], event["refs"], event["payload_bytes"]))
+            self.emit(_tr(
+                "已启动：连接={}，流={}，refs={}，payload={}B".format(
+                    event["connections"], event["streams"], event["refs"], event["payload_bytes"]),
+                "Started: connections={}, streams={}, refs={}, payload={}B".format(
+                    event["connections"], event["streams"], event["refs"], event["payload_bytes"])))
         elif kind == "connection":
             state = event.get("state")
             if state == "failed":
-                self.emit(f"连接 {event['id']} 失败：{event.get('error', '')}")
+                self.emit(_tr(f"连接 {event['id']} 失败：{event.get('error', '')}",
+                              f"Connection {event['id']} failed: {event.get('error', '')}"))
             else:
-                self.emit(f"连接 {event['id']}：{state}")
+                self.emit(_tr(f"连接 {event['id']}：{state}",
+                              f"Connection {event['id']}: {state}"))
             if state in ("failed", "peer_closed", "finished"):
                 with self._state_lock:
                     self._terminal_connections.add(event["id"])
@@ -129,7 +179,8 @@ class _RunController:
                     if should_stop:
                         self._stop_scheduled = True
                 if should_stop:
-                    self.emit("所有 PoC 连接都已关闭，停止运行")
+                    self.emit(_tr("所有 PoC 连接都已关闭，停止运行",
+                                  "All PoC connections are closed; stopping"))
                     threading.Thread(target=self.stop, daemon=True).start()
 
     def stop(self):
@@ -139,7 +190,7 @@ class _RunController:
             self.engine = None
         if self.thread is not None and self.thread is not threading.current_thread():
             self.thread.join(timeout=2.0)
-        self.emit("已停止")
+        self.emit(_tr("已停止", "Stopped"))
 
 
 class Plugin(NetPulsePlugin):
@@ -169,32 +220,33 @@ class Plugin(NetPulsePlugin):
         layout.setContentsMargins(28, 22, 28, 22)
         form = QFormLayout()
         self._target = QLineEdit(self._ctx.get("target", "http://127.0.0.1:10081"))
-        self._target.setPlaceholderText("http://host:port 或 https://host:port")
-        form.addRow(QLabel("目标"), self._target)
-        self._connections = self._spin(form, "连接数", 1, 32, 1)
-        self._streams = self._spin(form, "每连接流数", 1, 500, 30)
+        self._target.setPlaceholderText(_tr("http://host:port 或 https://host:port",
+                                           "http://host:port or https://host:port"))
+        form.addRow(QLabel(_tr("目标", "Target")), self._target)
+        self._connections = self._spin(form, _tr("连接数", "Connections"), 1, 32, 1)
+        self._streams = self._spin(form, _tr("每连接流数", "Streams per connection"), 1, 500, 30)
         self._refs = self._spin(form, "Cookie refs", 1, 4091, 4091)
         self._hold = QDoubleSpinBox()
         self._hold.setRange(1.0, 86400.0)
         self._hold.setValue(300.0)
         self._hold.setSuffix(" s")
-        form.addRow(QLabel("保持时间"), self._hold)
+        form.addRow(QLabel(_tr("保持时间", "Hold time")), self._hold)
         self._drip_interval = QDoubleSpinBox()
         self._drip_interval.setRange(0.0, 60.0)
         self._drip_interval.setValue(2.0)
         self._drip_interval.setSuffix(" s")
-        form.addRow(QLabel("窗口滴灌间隔"), self._drip_interval)
-        self._drip_bytes = self._spin(form, "每次滴灌字节", 0, 65535, 1)
+        form.addRow(QLabel(_tr("窗口滴灌间隔", "Window drip interval")), self._drip_interval)
+        self._drip_bytes = self._spin(form, _tr("每次滴灌字节", "Drip bytes"), 0, 65535, 1)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
-        self._start = QPushButton("检测并开始")
-        self._stop = QPushButton("停止")
+        self._start = QPushButton(_tr("检测并开始", "Check and start"))
+        self._stop = QPushButton(_tr("停止", "Stop"))
         self._stop.setEnabled(False)
         buttons.addWidget(self._start)
         buttons.addWidget(self._stop)
         layout.addLayout(buttons)
-        self._status = QLabel("就绪")
+        self._status = QLabel(_tr("就绪", "Ready"))
         layout.addWidget(self._status)
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
