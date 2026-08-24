@@ -2074,14 +2074,17 @@ class PluginMarketPage(QWidget):
         return r.json()["html_url"], False
 
     def _on_downloaded(self, entry, tmp_path):
+        # Save the marketplace icon before import_from() emits the loaded
+        # signal.  MainWindow resolves the navigation icon from this file
+        # while handling that signal; saving it afterwards makes the icon
+        # appear only after a restart.
+        self._save_plugin_icon(entry)
         ok, msg = plugin_manager.import_from(tmp_path)
         try:
             shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
         except Exception:
             pass
         if ok:
-            # 保存市场图标到本地，供导航栏和本地列表使用
-            self._save_plugin_icon(entry)
             InfoBar.success(L("安装成功", "Installed"),
                             L(f"{entry.get('id')} 已安装并启用",
                               f"{entry.get('id')} installed and enabled"),
