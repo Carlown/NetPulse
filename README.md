@@ -1,3 +1,7 @@
+<div align="center">
+<img src="./LargeLogo.png" alt="NetPulse Logo" width="546" height="184">
+</div>
+
 # NetPulse
 
 **Legally-Authorized Network Stress Testing & Performance Monitoring Tool**
